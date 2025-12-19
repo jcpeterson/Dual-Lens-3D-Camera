@@ -22,7 +22,7 @@
             android:id="@+id/captureButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Capture stereo (Wide + Ultra)"
+            android:text="Take Photo"
             android:enabled="false" />
 
         <TextView

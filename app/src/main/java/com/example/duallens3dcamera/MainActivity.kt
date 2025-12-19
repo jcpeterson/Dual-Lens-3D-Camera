@@ -45,15 +45,12 @@ import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
+    // new
+    private var sensorOrientation = 0
+
     companion object {
         private const val TAG = "DualLens3DCamera"
         private const val REQ_CAMERA = 1001
-
-        // v0 stability > max quality. If you want bigger later, raise these.
-        private const val MAX_STILL_WIDTH = 1600
-        private const val MAX_STILL_HEIGHT = 1600
-
-        private const val JPEG_QUALITY = 95
         private const val ALBUM_DIR = "DualLens3DCamera"
     }
 
@@ -195,7 +192,12 @@ class MainActivity : AppCompatActivity() {
             widePhysicalId = selected.widePhysicalId
             ultraPhysicalId = selected.ultraPhysicalId
 
-            val size = chooseCommonYuvSize(selected.widePhysicalId, selected.ultraPhysicalId)
+            // new
+            val characteristics = cameraManager.getCameraCharacteristics(selected.logicalId)
+            sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+
+//            val size = chooseCommonYuvSize(selected.widePhysicalId, selected.ultraPhysicalId)
+            val size = chooseCommonJpegSize(selected.widePhysicalId, selected.ultraPhysicalId)
             stillSize = size
 
             setupImageReaders(size)
@@ -204,7 +206,8 @@ class MainActivity : AppCompatActivity() {
                 appendLine("Logical camera: ${selected.logicalId}")
                 appendLine("Wide physical: ${selected.widePhysicalId}")
                 appendLine("Ultra physical: ${selected.ultraPhysicalId}")
-                appendLine("Capture size: ${size.width}x${size.height} (YUV → JPEG)")
+                appendLine("Capture size: ${size.width}x${size.height} (JPEG)")
+//                appendLine("Capture size: ${size.width}x${size.height} (YUV → JPEG)")
             }
 
             if (ActivityCompat.checkSelfPermission(
@@ -284,37 +287,39 @@ class MainActivity : AppCompatActivity() {
         throw IllegalStateException("No rear logical multi-camera found (Pixel 7 should support it).")
     }
 
-    private fun chooseCommonYuvSize(wideId: String, ultraId: String): Size {
-        fun yuvSizes(cameraId: String): List<Size> {
+    private fun chooseCommonJpegSize(wideId: String, ultraId: String): Size {
+        fun jpegSizes(cameraId: String): List<Size> {
             val chars = cameraManager.getCameraCharacteristics(cameraId)
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return emptyList()
-            val sizes = map.getOutputSizes(ImageFormat.YUV_420_888) ?: return emptyList()
+            // Query for JPEG sizes instead of YUV
+            val sizes = map.getOutputSizes(ImageFormat.JPEG) ?: return emptyList()
             return sizes.toList()
         }
 
-        val wideSizes = yuvSizes(wideId)
-        val ultraSizes = yuvSizes(ultraId)
+        val wideSizes = jpegSizes(wideId)
+        val ultraSizes = jpegSizes(ultraId)
 
+        // Find common sizes between the two physical cameras
         val ultraSet = ultraSizes.map { it.width to it.height }.toSet()
         val common = wideSizes.filter { ultraSet.contains(it.width to it.height) }
 
         if (common.isEmpty()) {
-            // Extremely unlikely on Pixel 7, but gives us a fallback.
-            return Size(1280, 720)
+            throw IllegalStateException("No common JPEG sizes found between wide and ultra-wide cameras.")
         }
 
-        val capped = common.filter { it.width <= MAX_STILL_WIDTH && it.height <= MAX_STILL_HEIGHT }
-        val pickFrom = if (capped.isNotEmpty()) capped else common
-
-        return pickFrom.maxBy { it.width.toLong() * it.height.toLong() }
+        // No need for MAX_STILL_WIDTH/HEIGHT anymore. Just find the largest common size.
+        // This will give you the ~12MP resolution you're looking for.
+        return common.maxByOrNull { it.width.toLong() * it.height.toLong() }
+            ?: throw IllegalStateException("Could not find a max size.")
     }
+
 
     private fun setupImageReaders(size: Size) {
         wideReader?.close()
         ultraReader?.close()
 
-        wideReader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
-        ultraReader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
+        wideReader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 2)
+        ultraReader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 2)
 
         wideReader!!.setOnImageAvailableListener({ reader ->
             val img = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
@@ -432,6 +437,15 @@ class MainActivity : AppCompatActivity() {
             builder.addTarget(wide.surface)
             builder.addTarget(ultra.surface)
 
+            // set JPEG quality
+            builder.set(CaptureRequest.JPEG_QUALITY, 100.toByte())
+
+            // make sure it's rotated correctly
+            val deviceRotation = display!!.rotation
+            val jpegOrientation = (sensorOrientation - (deviceRotation * 90) + 360) % 360
+            builder.set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+
+            // autofocus, exposure, and white balance all set to AUTO
             builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
@@ -484,16 +498,12 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) { }
     }
 
+    // Replace the entire handleImage function with this simpler version
     private fun handleImage(isWide: Boolean, image: Image) {
-        val jpegBytes: ByteArray
+        val buffer = image.planes[0].buffer
+        val jpegBytes = ByteArray(buffer.remaining())
+        buffer.get(jpegBytes)
         val ts = image.timestamp
-        try {
-            jpegBytes = yuv420ToJpeg(image, JPEG_QUALITY)
-        } catch (e: Exception) {
-            Log.e(TAG, "YUV->JPEG failed", e)
-            image.close()
-            return
-        }
         image.close()
 
         var toSaveWide: JpegResult? = null
