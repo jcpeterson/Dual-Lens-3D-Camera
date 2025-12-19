@@ -528,66 +528,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun yuv420ToJpeg(image: Image, quality: Int): ByteArray {
-        val nv21 = yuv420ToNv21(image)
-        val yuv = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
-        val out = ByteArrayOutputStream()
-        yuv.compressToJpeg(Rect(0, 0, image.width, image.height), quality, out)
-        return out.toByteArray()
-    }
-
-    private fun yuv420ToNv21(image: Image): ByteArray {
-        val width = image.width
-        val height = image.height
-
-        val ySize = width * height
-        val uvSize = width * height / 2
-        val out = ByteArray(ySize + uvSize)
-
-        val yPlane = image.planes[0]
-        val uPlane = image.planes[1]
-        val vPlane = image.planes[2]
-
-        val yBuf = yPlane.buffer
-        val yRowStride = yPlane.rowStride
-        val yPixStride = yPlane.pixelStride
-
-        var outIndex = 0
-        for (row in 0 until height) {
-            var inIndex = row * yRowStride
-            for (col in 0 until width) {
-                out[outIndex++] = yBuf.get(inIndex)
-                inIndex += yPixStride
-            }
-        }
-
-        val uBuf = uPlane.buffer
-        val vBuf = vPlane.buffer
-        val uRowStride = uPlane.rowStride
-        val vRowStride = vPlane.rowStride
-        val uPixStride = uPlane.pixelStride
-        val vPixStride = vPlane.pixelStride
-
-        val chromaHeight = height / 2
-        val chromaWidth = width / 2
-
-        outIndex = ySize
-        for (row in 0 until chromaHeight) {
-            val uRowStart = row * uRowStride
-            val vRowStart = row * vRowStride
-            for (col in 0 until chromaWidth) {
-                val uIndex = uRowStart + col * uPixStride
-                val vIndex = vRowStart + col * vPixStride
-
-                // NV21 is V then U
-                out[outIndex++] = vBuf.get(vIndex)
-                out[outIndex++] = uBuf.get(uIndex)
-            }
-        }
-
-        return out
-    }
-
     private fun savePair(wide: JpegResult, ultra: JpegResult) {
         val deltaMs = abs(wide.timestampNs - ultra.timestampNs) / 1_000_000.0
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
