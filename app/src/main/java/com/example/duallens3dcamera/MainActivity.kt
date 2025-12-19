@@ -12,6 +12,7 @@ import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.TotalCaptureResult
@@ -32,7 +33,6 @@ import android.view.TextureView
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
-import androidx.annotation.RequiresPermission
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -46,7 +46,7 @@ import kotlin.math.abs
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        private const val TAG = "StereoInstantV0"
+        private const val TAG = "DualLens3DCamera"
         private const val REQ_CAMERA = 1001
 
         // v0 stability > max quality. If you want bigger later, raise these.
@@ -54,16 +54,15 @@ class MainActivity : AppCompatActivity() {
         private const val MAX_STILL_HEIGHT = 1600
 
         private const val JPEG_QUALITY = 95
-        private const val ALBUM_DIR = "StereoInstantV0"
+        private const val ALBUM_DIR = "DualLens3DCamera"
     }
 
-    private lateinit var viewFinderLeft: TextureView
-    private lateinit var viewFinderRight: TextureView
+    private lateinit var viewFinder: TextureView
     private lateinit var captureButton: Button
     private lateinit var statusText: TextView
 
     private val cameraManager by lazy {
-        getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+        getSystemService(Context.CAMERA_SERVICE) as CameraManager
     }
 
     private var logicalCameraId: String? = null
@@ -73,8 +72,7 @@ class MainActivity : AppCompatActivity() {
     private var cameraDevice: CameraDevice? = null
     private var session: CameraCaptureSession? = null
 
-    private var previewSurfaceLeft: Surface? = null
-    private var previewSurfaceRight: Surface? = null
+    private var previewSurface: Surface? = null
     private var previewRequest: CaptureRequest? = null
 
     private var wideReader: ImageReader? = null
@@ -89,75 +87,45 @@ class MainActivity : AppCompatActivity() {
 
     private val sessionExecutor = Executors.newSingleThreadExecutor()
 
-    private data class JpegResult(val bytes: ByteArray, val timestampNs: Long) {
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (javaClass != other?.javaClass) return false
-            other as JpegResult
-            if (!bytes.contentEquals(other.bytes)) return false
-            if (timestampNs != other.timestampNs) return false
-            return true
-        }
-
-        override fun hashCode(): Int {
-            var result = bytes.contentHashCode()
-            result = 31 * result + timestampNs.hashCode()
-            return result
-        }
-    }
+    // Pairing state
+    private data class JpegResult(val bytes: ByteArray, val timestampNs: Long)
 
     private val pairLock = Any()
     private var captureArmed = false
     private var pendingWide: JpegResult? = null
     private var pendingUltra: JpegResult? = null
 
-    private var surfacesInitialized = false
-
-    private val textureListenerLeft = object : TextureView.SurfaceTextureListener {
-        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) { checkAndStart() }
-        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
-        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
-        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
-    }
-
-    private val textureListenerRight = object : TextureView.SurfaceTextureListener {
-        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) { checkAndStart() }
-        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
-        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
-        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
-    }
-
-    private fun checkAndStart() {
-        if (viewFinderLeft.isAvailable && viewFinderRight.isAvailable) {
-            if (!surfacesInitialized) {
-                surfacesInitialized = true
-                maybeStartCamera()
-            }
+    private val textureListener = object : TextureView.SurfaceTextureListener {
+        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+            maybeStartCamera()
         }
+        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
+        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        viewFinderLeft = findViewById(R.id.viewFinder_left)
-        viewFinderRight = findViewById(R.id.viewFinder_right)
+        viewFinder = findViewById(R.id.viewFinder)
         captureButton = findViewById(R.id.captureButton)
         statusText = findViewById(R.id.statusText)
 
         captureButton.setOnClickListener { takeStereo() }
         captureButton.isEnabled = false
 
-        statusText.text = "Waiting for camera permission…"
+        statusText.text = "Waiting for preview surface…"
     }
 
     override fun onResume() {
         super.onResume()
         startThreads()
-        surfacesInitialized = false
-        viewFinderLeft.surfaceTextureListener = textureListenerLeft
-        viewFinderRight.surfaceTextureListener = textureListenerRight
-        checkAndStart()
+        if (viewFinder.isAvailable) {
+            maybeStartCamera()
+        } else {
+            viewFinder.surfaceTextureListener = textureListener
+        }
     }
 
     override fun onPause() {
@@ -169,6 +137,7 @@ class MainActivity : AppCompatActivity() {
     private fun startThreads() {
         cameraThread = HandlerThread("CameraThread").apply { start() }
         cameraHandler = Handler(cameraThread!!.looper)
+
         imageThread = HandlerThread("ImageThread").apply { start() }
         imageHandler = Handler(imageThread!!.looper)
     }
@@ -187,11 +156,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun maybeStartCamera() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            startCamera()
-        } else {
+        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
+        if (!granted) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), REQ_CAMERA)
+            return
         }
+        startCamera()
     }
 
     override fun onRequestPermissionsResult(
@@ -201,12 +172,8 @@ class MainActivity : AppCompatActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_CAMERA) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startCamera()
-            } else {
-                toast("Camera permission is required to use this app.")
-                finish()
-            }
+            val ok = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+            if (ok) maybeStartCamera() else toast("Camera permission required.")
         }
     }
 
@@ -218,10 +185,9 @@ class MainActivity : AppCompatActivity() {
 
     private data class PhysicalInfo(val id: String, val minFocalMm: Float)
 
-    @RequiresPermission(Manifest.permission.CAMERA)
     private fun startCamera() {
         if (cameraDevice != null) return
-        if (!viewFinderLeft.isAvailable || !viewFinderRight.isAvailable) return
+        if (!viewFinder.isAvailable) return
 
         try {
             val selected = selectRearLogicalWideUltra()
@@ -236,11 +202,25 @@ class MainActivity : AppCompatActivity() {
 
             statusText.text = buildString {
                 appendLine("Logical camera: ${selected.logicalId}")
-                appendLine("Wide physical (left): ${selected.widePhysicalId}")
-                appendLine("Ultra physical (right): ${selected.ultraPhysicalId}")
+                appendLine("Wide physical: ${selected.widePhysicalId}")
+                appendLine("Ultra physical: ${selected.ultraPhysicalId}")
                 appendLine("Capture size: ${size.width}x${size.height} (YUV → JPEG)")
             }
 
+            if (ActivityCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.CAMERA
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                // TODO: Consider calling
+                //    ActivityCompat#requestPermissions
+                // here to request the missing permissions, and then overriding
+                //   public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                //                                          int[] grantResults)
+                // to handle the case where the user grants the permission. See the documentation
+                // for ActivityCompat#requestPermissions for more details.
+                return
+            }
             cameraManager.openCamera(selected.logicalId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     cameraDevice = camera
@@ -293,6 +273,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }.sortedBy { it.minFocalMm }
 
+            // Sorted: smallest focal = ultra-wide, next = wide.
             if (phys.size >= 2) {
                 val ultra = phys[0].id
                 val wide = phys[1].id
@@ -307,7 +288,8 @@ class MainActivity : AppCompatActivity() {
         fun yuvSizes(cameraId: String): List<Size> {
             val chars = cameraManager.getCameraCharacteristics(cameraId)
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return emptyList()
-            return map.getOutputSizes(ImageFormat.YUV_420_888)?.toList() ?: emptyList()
+            val sizes = map.getOutputSizes(ImageFormat.YUV_420_888) ?: return emptyList()
+            return sizes.toList()
         }
 
         val wideSizes = yuvSizes(wideId)
@@ -317,13 +299,14 @@ class MainActivity : AppCompatActivity() {
         val common = wideSizes.filter { ultraSet.contains(it.width to it.height) }
 
         if (common.isEmpty()) {
+            // Extremely unlikely on Pixel 7, but gives us a fallback.
             return Size(1280, 720)
         }
 
         val capped = common.filter { it.width <= MAX_STILL_WIDTH && it.height <= MAX_STILL_HEIGHT }
-        val pickFrom = capped.ifEmpty { common }
+        val pickFrom = if (capped.isNotEmpty()) capped else common
 
-        return pickFrom.maxByOrNull { it.width.toLong() * it.height.toLong() }!!
+        return pickFrom.maxBy { it.width.toLong() * it.height.toLong() }
     }
 
     private fun setupImageReaders(size: Size) {
@@ -349,21 +332,17 @@ class MainActivity : AppCompatActivity() {
         val wideId = widePhysicalId ?: return
         val ultraId = ultraPhysicalId ?: return
         val size = stillSize ?: return
+        val ch = cameraHandler ?: return
 
-        val surfaceTextureLeft = viewFinderLeft.surfaceTexture!!
-        surfaceTextureLeft.setDefaultBufferSize(size.width, size.height)
-        previewSurfaceLeft = Surface(surfaceTextureLeft)
+        val surfaceTexture = viewFinder.surfaceTexture ?: return
+        surfaceTexture.setDefaultBufferSize(size.width, size.height)
+        previewSurface = Surface(surfaceTexture)
 
-        val surfaceTextureRight = viewFinderRight.surfaceTexture!!
-        surfaceTextureRight.setDefaultBufferSize(size.width, size.height)
-        previewSurfaceRight = Surface(surfaceTextureRight)
-
-        val previewConfigLeft = OutputConfiguration(previewSurfaceLeft!!).apply { setPhysicalCameraId(wideId) }
-        val previewConfigRight = OutputConfiguration(previewSurfaceRight!!).apply { setPhysicalCameraId(ultraId) }
+        val previewConfig = OutputConfiguration(previewSurface!!).apply { setPhysicalCameraId(wideId) }
         val wideConfig = OutputConfiguration(wideReader!!.surface).apply { setPhysicalCameraId(wideId) }
         val ultraConfig = OutputConfiguration(ultraReader!!.surface).apply { setPhysicalCameraId(ultraId) }
 
-        val outputs = listOf(previewConfigLeft, previewConfigRight, wideConfig, ultraConfig)
+        val outputs = listOf(previewConfig, wideConfig, ultraConfig)
 
         val sessionConfig = SessionConfiguration(
             SessionConfiguration.SESSION_REGULAR,
@@ -375,7 +354,7 @@ class MainActivity : AppCompatActivity() {
                     startPreview()
                     runOnUiThread {
                         captureButton.isEnabled = true
-                        toast("Ready.")
+                        toast("Ready. Hold phone landscape for v0.")
                     }
                 }
 
@@ -383,7 +362,7 @@ class MainActivity : AppCompatActivity() {
                     session = null
                     runOnUiThread {
                         captureButton.isEnabled = false
-                        toast("Session config failed.")
+                        toast("Session config failed. Try lowering MAX_STILL_WIDTH/HEIGHT.")
                     }
                 }
             }
@@ -401,17 +380,14 @@ class MainActivity : AppCompatActivity() {
         val cam = cameraDevice ?: return
         val s = session ?: return
         val wideId = widePhysicalId ?: return
-        val ultraId = ultraPhysicalId ?: return
         val handler = cameraHandler ?: return
 
         try {
             val builder = cam.createCaptureRequest(
                 CameraDevice.TEMPLATE_PREVIEW,
-                setOf(wideId, ultraId)
+                setOf(wideId)
             )
-            builder.addTarget(previewSurfaceLeft!!)
-            builder.addTarget(previewSurfaceRight!!)
-
+            builder.addTarget(previewSurface!!)
             builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
 
@@ -445,6 +421,7 @@ class MainActivity : AppCompatActivity() {
         drain(ultra)
 
         try {
+            // Pause preview to reduce pipeline contention for v0.
             s.stopRepeating()
             s.abortCaptures()
 
@@ -487,6 +464,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }, handler)
 
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "takeStereo CameraAccessException", e)
+            runOnUiThread { captureButton.isEnabled = true }
+            toast("Capture error: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "takeStereo failed", e)
             runOnUiThread { captureButton.isEnabled = true }
@@ -504,14 +485,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleImage(isWide: Boolean, image: Image) {
-        val jpegBytes = try {
-            yuv420ToJpeg(image)
+        val jpegBytes: ByteArray
+        val ts = image.timestamp
+        try {
+            jpegBytes = yuv420ToJpeg(image, JPEG_QUALITY)
         } catch (e: Exception) {
             Log.e(TAG, "YUV->JPEG failed", e)
             image.close()
             return
         }
-        val ts = image.timestamp
         image.close()
 
         var toSaveWide: JpegResult? = null
@@ -520,11 +502,7 @@ class MainActivity : AppCompatActivity() {
         synchronized(pairLock) {
             if (!captureArmed) return
 
-            if (isWide) {
-                pendingWide = JpegResult(jpegBytes, ts)
-            } else {
-                pendingUltra = JpegResult(jpegBytes, ts)
-            }
+            if (isWide) pendingWide = JpegResult(jpegBytes, ts) else pendingUltra = JpegResult(jpegBytes, ts)
 
             if (pendingWide != null && pendingUltra != null) {
                 captureArmed = false
@@ -540,46 +518,63 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun yuv420ToJpeg(image: Image): ByteArray {
+    private fun yuv420ToJpeg(image: Image, quality: Int): ByteArray {
         val nv21 = yuv420ToNv21(image)
         val yuv = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
-        return ByteArrayOutputStream().use { out ->
-            yuv.compressToJpeg(Rect(0, 0, image.width, image.height), JPEG_QUALITY, out)
-            out.toByteArray()
-        }
+        val out = ByteArrayOutputStream()
+        yuv.compressToJpeg(Rect(0, 0, image.width, image.height), quality, out)
+        return out.toByteArray()
     }
 
     private fun yuv420ToNv21(image: Image): ByteArray {
         val width = image.width
         val height = image.height
+
         val ySize = width * height
-        val out = ByteArray(ySize + (width * height / 2))
+        val uvSize = width * height / 2
+        val out = ByteArray(ySize + uvSize)
 
-        val yPlane = image.planes[0].buffer
-        val uPlane = image.planes[1].buffer
-        val vPlane = image.planes[2].buffer
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
 
-        yPlane.get(out, 0, ySize)
+        val yBuf = yPlane.buffer
+        val yRowStride = yPlane.rowStride
+        val yPixStride = yPlane.pixelStride
 
-        val uPixelStride = image.planes[1].pixelStride
-        val vPixelStride = image.planes[2].pixelStride
-
-        if (uPixelStride == 2 && vPixelStride == 2 && image.planes[1].rowStride == image.planes[2].rowStride) {
-            vPlane.get(out, ySize, vPlane.remaining().coerceAtMost(out.size - ySize))
-            if (uPlane.hasArray() && uPlane.arrayOffset() == 0 && uPlane.array().size == out.size) {
-                 System.arraycopy(uPlane.array(), 1, out, ySize + 1, uPlane.limit() - 1)
-            }
-        } else {
-            var outPos = ySize
-            for (row in 0 until height / 2) {
-                for (col in 0 until width / 2) {
-                    val vPos = row * image.planes[2].rowStride + col * vPixelStride
-                    val uPos = row * image.planes[1].rowStride + col * uPixelStride
-                    out[outPos++] = vPlane[vPos]
-                    out[outPos++] = uPlane[uPos]
-                }
+        var outIndex = 0
+        for (row in 0 until height) {
+            var inIndex = row * yRowStride
+            for (col in 0 until width) {
+                out[outIndex++] = yBuf.get(inIndex)
+                inIndex += yPixStride
             }
         }
+
+        val uBuf = uPlane.buffer
+        val vBuf = vPlane.buffer
+        val uRowStride = uPlane.rowStride
+        val vRowStride = vPlane.rowStride
+        val uPixStride = uPlane.pixelStride
+        val vPixStride = vPlane.pixelStride
+
+        val chromaHeight = height / 2
+        val chromaWidth = width / 2
+
+        outIndex = ySize
+        for (row in 0 until chromaHeight) {
+            val uRowStart = row * uRowStride
+            val vRowStart = row * vRowStride
+            for (col in 0 until chromaWidth) {
+                val uIndex = uRowStart + col * uPixStride
+                val vIndex = vRowStart + col * vPixStride
+
+                // NV21 is V then U
+                out[outIndex++] = vBuf.get(vIndex)
+                out[outIndex++] = uBuf.get(uIndex)
+            }
+        }
+
         return out
     }
 
@@ -605,20 +600,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveJpeg(fileName: String, bytes: ByteArray): Uri? {
         val resolver = contentResolver
+
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            // API 29+ scoped storage path:
             put(
                 MediaStore.Images.Media.RELATIVE_PATH,
                 Environment.DIRECTORY_PICTURES + "/" + ALBUM_DIR
             )
         }
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-        uri?.let {
-            resolver.openOutputStream(it)?.use { stream ->
-                stream.write(bytes)
-            }
-        }
+
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        resolver.openOutputStream(uri)?.use { it.write(bytes) }
         return uri
     }
 
@@ -637,12 +631,8 @@ class MainActivity : AppCompatActivity() {
         try { ultraReader?.close() } catch (_: Exception) { }
         ultraReader = null
 
-        try {
-            previewSurfaceLeft?.release()
-            previewSurfaceRight?.release()
-        } catch (_: Exception) { }
-        previewSurfaceLeft = null
-        previewSurfaceRight = null
+        try { previewSurface?.release() } catch (_: Exception) { }
+        previewSurface = null
 
         synchronized(pairLock) {
             captureArmed = false
@@ -656,5 +646,4 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
         }
     }
-
 }
