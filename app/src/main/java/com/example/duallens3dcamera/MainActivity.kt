@@ -1,6 +1,3 @@
-// The goal of this app is to take photos with the main and
-// ultrawide sensors at the same time for later stereoscopic use.
-
 package com.example.duallens3dcamera
 
 import android.Manifest
@@ -9,14 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
-import android.hardware.camera2.CameraAccessException
-import android.hardware.camera2.CameraCaptureSession
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraDevice
-import android.hardware.camera2.CameraManager
-import android.hardware.camera2.CaptureFailure
-import android.hardware.camera2.CaptureRequest
-import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.*
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.Image
@@ -26,44 +16,42 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
-import android.os.Looper
 import android.provider.MediaStore
+import android.text.method.ScrollingMovementMethod
 import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
+import android.view.View
 import android.widget.Button
+import android.widget.ImageButton
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.util.*
 import java.util.concurrent.Executors
 import kotlin.math.abs
-
 
 class MainActivity : AppCompatActivity() {
 
     private var sensorOrientation = 0
 
-    private val uiHandler = Handler(Looper.getMainLooper())
-
     companion object {
         private const val TAG = "DualLens3DCamera"
         private const val REQ_CAMERA = 1001
         private const val ALBUM_DIR = "DualLens3DCamera"
+        private const val JPEG_CAPTURE_QUALITY = 100
+        private const val MAX_LOG_LINES = 20
     }
 
     private lateinit var viewFinder: TextureView
     private lateinit var captureButton: Button
+    private lateinit var flashButton: Button
     private lateinit var statusText: TextView
 
-    private val cameraManager by lazy {
-        getSystemService(Context.CAMERA_SERVICE) as CameraManager
-    }
+    private val cameraManager by lazy { getSystemService(Context.CAMERA_SERVICE) as CameraManager }
 
     private var logicalCameraId: String? = null
     private var widePhysicalId: String? = null
@@ -71,7 +59,6 @@ class MainActivity : AppCompatActivity() {
 
     private var cameraDevice: CameraDevice? = null
     private var session: CameraCaptureSession? = null
-
     private var previewSurface: Surface? = null
     private var previewRequest: CaptureRequest? = null
 
@@ -81,37 +68,24 @@ class MainActivity : AppCompatActivity() {
 
     private var cameraThread: HandlerThread? = null
     private var cameraHandler: Handler? = null
-
     private var imageThread: HandlerThread? = null
     private var imageHandler: Handler? = null
 
     private val sessionExecutor = Executors.newSingleThreadExecutor()
 
-    // Pairing state
-    private data class JpegResult(val bytes: ByteArray, val timestampNs: Long)
+    // State variables
+    private var isTorchOn = false
+    private var isLogVisible = false
+    private val logMessages = LinkedList<String>()
 
+    private data class JpegResult(val bytes: ByteArray, val timestampNs: Long)
     private val pairLock = Any()
     private var captureArmed = false
     private var pendingWide: JpegResult? = null
     private var pendingUltra: JpegResult? = null
 
-    private fun chooseOptimalPreviewSize(cameraId: String): Size {
-        val chars = cameraManager.getCameraCharacteristics(cameraId)
-        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
-        val outputSizes = map.getOutputSizes(SurfaceTexture::class.java)
-
-        // Find the largest preview size that is no bigger than 1080p
-//        return outputSizes.filter { it.width <= 1920 && it.height <= 1080 }
-//            .maxByOrNull { it.width.toLong() * it.height.toLong() } ?: outputSizes[0]
-        // Find the largest preview size that is no bigger than 480p
-        return outputSizes.filter { it.width <= 640 && it.height <= 480 }
-            .maxByOrNull { it.width.toLong() * it.height.toLong() } ?: outputSizes[0]
-    }
-
     private val textureListener = object : TextureView.SurfaceTextureListener {
-        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-            maybeStartCamera()
-        }
+        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) { maybeStartCamera() }
         override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
         override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
         override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
@@ -123,12 +97,20 @@ class MainActivity : AppCompatActivity() {
 
         viewFinder = findViewById(R.id.viewFinder)
         captureButton = findViewById(R.id.captureButton)
+        flashButton = findViewById(R.id.flashButton)
         statusText = findViewById(R.id.statusText)
 
+        // Set click listeners
         captureButton.setOnClickListener { takeStereo() }
-        captureButton.isEnabled = false
+        flashButton.setOnClickListener { toggleTorch() }
+        viewFinder.setOnClickListener { toggleLogView() }
 
-//        statusText.text = "Waiting for preview surface…"
+        // Initial setup
+        captureButton.isEnabled = false
+        statusText.visibility = View.GONE
+        statusText.movementMethod = ScrollingMovementMethod.getInstance()
+        updateLog(" -- BEGIN LOG -- ")
+        updateLog("Initializing...")
     }
 
     override fun onResume() {
@@ -150,7 +132,6 @@ class MainActivity : AppCompatActivity() {
     private fun startThreads() {
         cameraThread = HandlerThread("CameraThread").apply { start() }
         cameraHandler = Handler(cameraThread!!.looper)
-
         imageThread = HandlerThread("ImageThread").apply { start() }
         imageHandler = Handler(imageThread!!.looper)
     }
@@ -161,7 +142,7 @@ class MainActivity : AppCompatActivity() {
         try {
             cameraThread?.join()
             imageThread?.join()
-        } catch (_: InterruptedException) { }
+        } catch (_: InterruptedException) {}
         cameraThread = null
         cameraHandler = null
         imageThread = null
@@ -169,8 +150,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun maybeStartCamera() {
-        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
-                PackageManager.PERMISSION_GRANTED
+        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         if (!granted) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), REQ_CAMERA)
             return
@@ -178,29 +158,22 @@ class MainActivity : AppCompatActivity() {
         startCamera()
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_CAMERA) {
-            val ok = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
-            if (ok) maybeStartCamera() else toast("Camera permission required.")
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                maybeStartCamera()
+            } else {
+                updateLog("Camera permission required.")
+            }
         }
     }
 
-    private data class SelectedCameras(
-        val logicalId: String,
-        val widePhysicalId: String,
-        val ultraPhysicalId: String
-    )
-
+    private data class SelectedCameras(val logicalId: String, val widePhysicalId: String, val ultraPhysicalId: String)
     private data class PhysicalInfo(val id: String, val minFocalMm: Float)
 
     private fun startCamera() {
-        if (cameraDevice != null) return
-        if (!viewFinder.isAvailable) return
+        if (cameraDevice != null || !viewFinder.isAvailable) return
 
         try {
             val selected = selectRearLogicalWideUltra()
@@ -208,8 +181,8 @@ class MainActivity : AppCompatActivity() {
             widePhysicalId = selected.widePhysicalId
             ultraPhysicalId = selected.ultraPhysicalId
 
-            // new
             val characteristics = cameraManager.getCameraCharacteristics(selected.logicalId)
+            // figure out the canonical sensor orientation
             sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
 
             val size = chooseCommonJpegSize(selected.widePhysicalId, selected.ultraPhysicalId)
@@ -217,50 +190,30 @@ class MainActivity : AppCompatActivity() {
 
             setupImageReaders(size)
 
-//            toast(
-//                buildString {
-//                appendLine("Logical camera: ${selected.logicalId}")
-//                appendLine("Wide physical: ${selected.widePhysicalId}")
-//                appendLine("Ultra physical: ${selected.ultraPhysicalId}")
-//                appendLine("Capture size: ${size.width}x${size.height} (JPEG)")
-//            })
+            updateLog("Found cameras.")
+            updateLog("Per-camera image size: ${size.width}x${size.height}.")
 
-            if (ActivityCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.CAMERA
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                // TODO: Consider calling
-                //    ActivityCompat#requestPermissions
-                // here to request the missing permissions, and then overriding
-                //   public void onRequestPermissionsResult(int requestCode, String[] permissions,
-                //                                          int[] grantResults)
-                // to handle the case where the user grants the permission. See the documentation
-                // for ActivityCompat#requestPermissions for more details.
-                return
-            }
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
             cameraManager.openCamera(selected.logicalId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     cameraDevice = camera
                     createSession()
                 }
-
                 override fun onDisconnected(camera: CameraDevice) {
                     camera.close()
                     cameraDevice = null
-                    toast("Camera disconnected.")
+                    updateLog("Camera disconnected.")
                 }
-
                 override fun onError(camera: CameraDevice, error: Int) {
                     camera.close()
                     cameraDevice = null
-                    toast("Camera error: $error")
+                    updateLog("Camera error: $error")
                 }
             }, cameraHandler)
 
         } catch (e: Exception) {
             Log.e(TAG, "startCamera failed", e)
-            toast("Start failed: ${e.message}")
+            updateLog("Start failed: ${e.message}")
         }
     }
 
@@ -321,12 +274,19 @@ class MainActivity : AppCompatActivity() {
             throw IllegalStateException("No common JPEG sizes found between wide and ultra-wide cameras.")
         }
 
-        // No need for MAX_STILL_WIDTH/HEIGHT anymore. Just find the largest common size.
-        // This will give you the ~12MP resolution you're looking for.
+        // Find the largest common size for the two camera streams.
+        // In many cases, this will be ~12MP, especially on Pixel devices.
         return common.maxByOrNull { it.width.toLong() * it.height.toLong() }
             ?: throw IllegalStateException("Could not find a max size.")
     }
 
+    private fun chooseOptimalPreviewSize(cameraId: String): Size {
+        val chars = cameraManager.getCameraCharacteristics(cameraId)
+        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
+        val outputSizes = map.getOutputSizes(SurfaceTexture::class.java)
+        return outputSizes.filter { it.width <= 1920 && it.height <= 1080 }
+            .maxByOrNull { it.width.toLong() * it.height.toLong() } ?: outputSizes[0]
+    }
 
     private fun setupImageReaders(size: Size) {
         wideReader?.close()
@@ -336,13 +296,10 @@ class MainActivity : AppCompatActivity() {
         ultraReader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 2)
 
         wideReader!!.setOnImageAvailableListener({ reader ->
-            val img = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-            handleImage(isWide = true, image = img)
+            reader.acquireLatestImage()?.let { handleImage(isWide = true, image = it) }
         }, imageHandler)
-
         ultraReader!!.setOnImageAvailableListener({ reader ->
-            val img = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-            handleImage(isWide = false, image = img)
+            reader.acquireLatestImage()?.let { handleImage(isWide = false, image = it) }
         }, imageHandler)
     }
 
@@ -350,90 +307,97 @@ class MainActivity : AppCompatActivity() {
         val cam = cameraDevice ?: return
         val wideId = widePhysicalId ?: return
         val ultraId = ultraPhysicalId ?: return
-        val size = stillSize ?: return
-        val ch = cameraHandler ?: return
+        val w = wideReader ?: return
+        val u = ultraReader ?: return
 
         val surfaceTexture = viewFinder.surfaceTexture ?: return
-
-//        surfaceTexture.setDefaultBufferSize(size.width, size.height)
-
         val previewSize = chooseOptimalPreviewSize(wideId)
         surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
-
         previewSurface = Surface(surfaceTexture)
 
-        val previewConfig = OutputConfiguration(previewSurface!!).apply { setPhysicalCameraId(wideId) }
-        val wideConfig = OutputConfiguration(wideReader!!.surface).apply { setPhysicalCameraId(wideId) }
-        val ultraConfig = OutputConfiguration(ultraReader!!.surface).apply { setPhysicalCameraId(ultraId) }
-
-        val outputs = listOf(previewConfig, wideConfig, ultraConfig)
+        val wideConfig = OutputConfiguration(w.surface).apply { setPhysicalCameraId(wideId) }
+        val ultraConfig = OutputConfiguration(u.surface).apply { setPhysicalCameraId(ultraId) }
+        val previewConfig = OutputConfiguration(previewSurface!!)
 
         val sessionConfig = SessionConfiguration(
             SessionConfiguration.SESSION_REGULAR,
-            outputs,
+            listOf(previewConfig, wideConfig, ultraConfig),
             sessionExecutor,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
                     session = s
                     startPreview()
-                    runOnUiThread {
-                        captureButton.isEnabled = true
-                        toast("Ready. Hold phone in portrait orientation.")
-                    }
                 }
-
                 override fun onConfigureFailed(s: CameraCaptureSession) {
-                    session = null
-                    runOnUiThread {
-                        captureButton.isEnabled = false
-                        toast("Session config failed.")
-                    }
+                    updateLog("Capture session config failed.")
                 }
-            }
-        )
-
+            })
         try {
             cam.createCaptureSession(sessionConfig)
-        } catch (e: Exception) {
-            Log.e(TAG, "createSession failed", e)
-            toast("Create session failed: ${e.message}")
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "createCaptureSession failed", e)
+            updateLog("Session creation failed: ${e.message}")
         }
     }
 
     private fun startPreview() {
-        val cam = cameraDevice ?: return
-        val s = session ?: return
-        val wideId = widePhysicalId ?: return
-        val handler = cameraHandler ?: return
+        updatePreview()
+        runOnUiThread {
+            captureButton.isEnabled = true
+            flashButton.isEnabled = true
+            updateLog("Everything looks good. Ready to shoot!")
+        }
+    }
 
+    private fun updatePreview() {
+        val s = session ?: return
+        val cam = cameraDevice ?: return
         try {
-            val builder = cam.createCaptureRequest(
-                CameraDevice.TEMPLATE_PREVIEW,
-                setOf(wideId)
-            )
+            val builder = cam.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             builder.addTarget(previewSurface!!)
             builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
 
-            previewRequest = builder.build()
-            s.setRepeatingRequest(previewRequest!!, null, handler)
+            if (isTorchOn) {
+                builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+            } else {
+                builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+            }
+
+            s.setRepeatingRequest(builder.build(), null, cameraHandler)
+
         } catch (e: Exception) {
-            Log.e(TAG, "startPreview failed", e)
-            toast("Preview failed: ${e.message}")
+            Log.e(TAG, "updatePreview failed", e)
+            updateLog("Preview update failed: ${e.message}")
+        }
+    }
+
+    // In toggleTorch()
+    private fun toggleTorch() {
+        isTorchOn = !isTorchOn
+        val torchState = if (isTorchOn) "ON" else "OFF"
+        flashButton.text = "TORCH $torchState"
+        updatePreview()
+    }
+
+    private fun toggleLogView() {
+        isLogVisible = !isLogVisible
+        runOnUiThread {
+            statusText.visibility = if (isLogVisible) View.VISIBLE else View.GONE
         }
     }
 
     private fun takeStereo() {
-        val cam = cameraDevice ?: run { toast("Camera not ready"); return }
-        val s = session ?: run { toast("Session not ready"); return }
-        val handler = cameraHandler ?: run { toast("No camera handler"); return }
-        val wideId = widePhysicalId ?: run { toast("No wide id"); return }
-        val ultraId = ultraPhysicalId ?: run { toast("No ultra id"); return }
+        val cam = cameraDevice ?: run { updateLog("Camera not ready"); return }
+        val s = session ?: run { updateLog("Session not ready"); return }
+        val wideId = widePhysicalId ?: run { updateLog("No wide id"); return }
+        val ultraId = ultraPhysicalId ?: run { updateLog("No ultra id"); return }
+        val wide = wideReader ?: run { updateLog("No wide reader"); return }
+        val ultra = ultraReader ?: run { updateLog("No ultra reader"); return }
 
-        val wide = wideReader ?: run { toast("No wide reader"); return }
-        val ultra = ultraReader ?: run { toast("No ultra reader"); return }
-
-        runOnUiThread { captureButton.isEnabled = false }
+        runOnUiThread {
+            captureButton.isEnabled = false
+            updateLog("Capturing...")
+        }
 
         synchronized(pairLock) {
             captureArmed = true
@@ -445,28 +409,23 @@ class MainActivity : AppCompatActivity() {
         drain(ultra)
 
         try {
-            // Pause preview to reduce pipeline contention for v0.
-            s.stopRepeating()
-            s.abortCaptures()
-
             val builder = cam.createCaptureRequest(
                 CameraDevice.TEMPLATE_STILL_CAPTURE,
                 setOf(wideId, ultraId)
             )
             builder.addTarget(wide.surface)
             builder.addTarget(ultra.surface)
-
-            // set JPEG quality
-            builder.set(CaptureRequest.JPEG_QUALITY, 100.toByte())
-
-            // lens distortion correction
-            builder.set(
-                CaptureRequest.DISTORTION_CORRECTION_MODE,
-                CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
-            )
+            builder.set(CaptureRequest.JPEG_QUALITY, JPEG_CAPTURE_QUALITY.toByte())
+            // lens distortion correction (highest quality)
+            builder.set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
 
             // make sure it's rotated correctly
-            val deviceRotation = display!!.rotation
+            val deviceRotation = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                display?.rotation ?: 0
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.rotation
+            }
             val jpegOrientation = (sensorOrientation - (deviceRotation * 90) + 360) % 360
             builder.set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
 
@@ -476,41 +435,19 @@ class MainActivity : AppCompatActivity() {
             builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
 
             s.capture(builder.build(), object : CameraCaptureSession.CaptureCallback() {
-                override fun onCaptureFailed(
-                    session: CameraCaptureSession,
-                    request: CaptureRequest,
-                    failure: CaptureFailure
-                ) {
-                    runOnUiThread {
-                        captureButton.isEnabled = true
-                        toast("Capture failed: ${failure.reason}")
-                    }
-                    restartPreviewSafely(session)
+                override fun onCaptureFailed(s: CameraCaptureSession, r: CaptureRequest, f: CaptureFailure) {
+                    Log.e(TAG, "Capture failed: ${f.reason}")
+                    updateLog("Capture failed!")
+                    synchronized(pairLock) { captureArmed = false }
+                    runOnUiThread { captureButton.isEnabled = true }
                 }
+            }, cameraHandler)
 
-                override fun onCaptureCompleted(
-                    session: CameraCaptureSession,
-                    request: CaptureRequest,
-                    result: TotalCaptureResult
-                ) {
-                    restartPreviewSafely(session)
-                }
-
-                private fun restartPreviewSafely(session: CameraCaptureSession) {
-                    try {
-                        previewRequest?.let { session.setRepeatingRequest(it, null, handler) }
-                    } catch (_: Exception) { }
-                }
-            }, handler)
-
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, "takeStereo CameraAccessException", e)
-            runOnUiThread { captureButton.isEnabled = true }
-            toast("Capture error: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "takeStereo failed", e)
+            updateLog("Capture start failed: ${e.message}")
+            synchronized(pairLock) { captureArmed = false }
             runOnUiThread { captureButton.isEnabled = true }
-            toast("Capture error: ${e.message}")
         }
     }
 
@@ -520,10 +457,9 @@ class MainActivity : AppCompatActivity() {
                 val img = reader.acquireLatestImage() ?: break
                 img.close()
             }
-        } catch (_: Exception) { }
+        } catch (_: Exception) {}
     }
 
-    // Replace the entire handleImage function with this simpler version
     private fun handleImage(isWide: Boolean, image: Image) {
         val buffer = image.planes[0].buffer
         val jpegBytes = ByteArray(buffer.remaining())
@@ -536,9 +472,7 @@ class MainActivity : AppCompatActivity() {
 
         synchronized(pairLock) {
             if (!captureArmed) return
-
             if (isWide) pendingWide = JpegResult(jpegBytes, ts) else pendingUltra = JpegResult(jpegBytes, ts)
-
             if (pendingWide != null && pendingUltra != null) {
                 captureArmed = false
                 toSaveWide = pendingWide
@@ -547,7 +481,6 @@ class MainActivity : AppCompatActivity() {
                 pendingUltra = null
             }
         }
-
         if (toSaveWide != null && toSaveUltra != null) {
             savePair(toSaveWide!!, toSaveUltra!!)
         }
@@ -558,74 +491,62 @@ class MainActivity : AppCompatActivity() {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val base = "Stereo_${stamp}"
 
-        val wideUri = saveJpeg("${base}_WIDE.jpg", wide.bytes)
-        val ultraUri = saveJpeg("${base}_ULTRA.jpg", ultra.bytes)
+        saveJpeg("${base}_WIDE.jpg", wide.bytes)
+        saveJpeg("${base}_ULTRA.jpg", ultra.bytes)
 
         runOnUiThread {
             captureButton.isEnabled = true
-            toast("Δt = ${"%.2f".format(deltaMs)} ms")
+            updateLog("Saved: $base (Δt ${"%.4f".format(deltaMs)} ms)")
         }
     }
 
-    private fun saveJpeg(fileName: String, bytes: ByteArray): Uri? {
+    private fun saveJpeg(filename: String, bytes: ByteArray) {
         val resolver = contentResolver
-
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            // API 29+ scoped storage path:
-            put(
-                MediaStore.Images.Media.RELATIVE_PATH,
-                Environment.DIRECTORY_PICTURES + "/" + ALBUM_DIR
-            )
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/$ALBUM_DIR")
         }
 
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
-        resolver.openOutputStream(uri)?.use { it.write(bytes) }
-        return uri
+        var uri: Uri? = null
+        try {
+            uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+                ?: throw Exception("MediaStore insert failed")
+            resolver.openOutputStream(uri).use { it?.write(bytes) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Save failed for $filename", e)
+            if (uri != null) resolver.delete(uri, null, null)
+            updateLog("Save failed for $filename")
+        }
     }
 
     private fun closeCamera() {
-        captureButton.isEnabled = false
-
-        try { session?.close() } catch (_: Exception) { }
-        session = null
-
-        try { cameraDevice?.close() } catch (_: Exception) { }
-        cameraDevice = null
-
-        try { wideReader?.close() } catch (_: Exception) { }
-        wideReader = null
-
-        try { ultraReader?.close() } catch (_: Exception) { }
-        ultraReader = null
-
-        try { previewSurface?.release() } catch (_: Exception) { }
-        previewSurface = null
-
-        synchronized(pairLock) {
-            captureArmed = false
-            pendingWide = null
-            pendingUltra = null
+        try {
+            session?.close()
+            cameraDevice?.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error closing camera", e)
+        } finally {
+            session = null
+            cameraDevice = null
         }
     }
 
-    private fun toast(msg: String) {
+    private fun updateLog(msg: String) {
         runOnUiThread {
-            // Cancel any previous message-clearing callbacks
-            uiHandler.removeCallbacksAndMessages(null)
-            // Set the new message
-            statusText.text = msg
-            // Post a new callback to clear the message after 5 seconds
-            uiHandler.postDelayed({
-                // Check if the message is still the one we set before clearing it
-                if (statusText.text == msg) {
-                    statusText.text = "" // Clear the text
-                }
-            }, 5000) // 5000 milliseconds = 5 seconds
+            // Also log to the system Logcat for persistent debugging
+            Log.d(TAG, "MESSAGE: $msg")
+
+            // Add the new message to the top of our list
+            logMessages.addLast(msg)
+
+            // If the list is too long, remove the oldest message
+            if (logMessages.size > MAX_LOG_LINES) {
+                logMessages.removeFirst()
+            }
+
+            // Build the log string and set it on the TextView
+            statusText.text = logMessages.joinToString("\n")
         }
     }
-
-
-
 }

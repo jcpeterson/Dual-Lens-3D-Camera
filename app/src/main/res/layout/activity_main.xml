@@ -9,66 +9,76 @@
     android:keepScreenOn="true"
     android:fitsSystemWindows="true">
 
-    <!-- The top status container -->
-    <LinearLayout
-        android:id="@+id/status_container"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:background="#88000000"
-        android:orientation="vertical"
-        android:padding="16dp"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent">
-
-        <TextView
-            android:id="@+id/statusText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center"
-            android:minLines="2"
-            android:text="Initializing..."
-            android:textColor="#FFFFFF" />
-    </LinearLayout>
-
     <!-- The bottom controls container -->
     <LinearLayout
         android:id="@+id/controls_container"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:background="#88000000"
-        android:gravity="center"
         android:orientation="vertical"
         android:paddingStart="24dp"
+        android:paddingTop="16dp"
         android:paddingEnd="24dp"
+        android:paddingBottom="16dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent">
 
+        <!-- Flash Button (now a regular Button) -->
+        <Button
+            android:id="@+id/flashButton"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:layout_marginBottom="16dp"
+            android:enabled="false"
+            android:text="TORCH"
+            android:textSize="18sp" />
+
+        <!-- Shutter Button now uses the selector drawable -->
         <Button
             android:id="@+id/captureButton"
             android:layout_width="match_parent"
-            android:layout_height="200dp"
+            android:layout_height="120dp"
+            android:background="@drawable/button_background_shutter"
             android:enabled="false"
             android:text="Take L/R Photos"
             android:textSize="20sp" />
+
     </LinearLayout>
 
+
     <!--
-    CORRECTED TextureView.
     - Width fills the screen horizontally.
     - Height is calculated from the ratio.
-    - Ratio "W,3:4" correctly sets a portrait 4:3 aspect ratio (Width:Height).
-    - It is vertically centered between the UI bars.
+    - Ratio "W,3:4" sets a portrait 4:3 aspect ratio (Width:Height).
+    - Vertically centered between the UI bars.
     -->
     <TextureView
         android:id="@+id/viewFinder"
         android:layout_width="0dp"
         android:layout_height="0dp"
         app:layout_constraintBottom_toTopOf="@+id/controls_container"
-        app:layout_constraintDimensionRatio="W,3:4"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/status_container" />
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!--
+    The status/log TextView. It's an overlay, hidden by default, and scrollable.
+    -->
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="#A0000000"
+        android:gravity="start"
+        android:maxLines="8"
+        android:padding="16dp"
+        android:scrollbars="vertical"
+        android:text="Log..."
+        android:textColor="#FFFFFF"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
