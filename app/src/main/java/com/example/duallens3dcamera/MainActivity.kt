@@ -386,6 +386,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+
     private fun takeStereo() {
         val cam = cameraDevice ?: run { updateLog("Camera not ready"); return }
         val s = session ?: run { updateLog("Session not ready"); return }
