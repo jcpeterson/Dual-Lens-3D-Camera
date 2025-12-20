@@ -44,6 +44,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
+
 class MainActivity : AppCompatActivity() {
 
     private var sensorOrientation = 0
