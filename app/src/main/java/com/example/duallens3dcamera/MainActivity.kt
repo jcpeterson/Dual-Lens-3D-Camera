@@ -1,3 +1,6 @@
+// The goal of this app is to take photos with the main and
+// ultrawide sensors at the same time for later stereoscopic use.
+
 package com.example.duallens3dcamera
 
 import android.Manifest
@@ -5,9 +8,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
-import android.graphics.Rect
 import android.graphics.SurfaceTexture
-import android.graphics.YuvImage
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -25,6 +26,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Size
@@ -36,7 +38,6 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -45,8 +46,9 @@ import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
-    // new
     private var sensorOrientation = 0
+
+    private val uiHandler = Handler(Looper.getMainLooper())
 
     companion object {
         private const val TAG = "DualLens3DCamera"
@@ -92,6 +94,19 @@ class MainActivity : AppCompatActivity() {
     private var pendingWide: JpegResult? = null
     private var pendingUltra: JpegResult? = null
 
+    private fun chooseOptimalPreviewSize(cameraId: String): Size {
+        val chars = cameraManager.getCameraCharacteristics(cameraId)
+        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
+        val outputSizes = map.getOutputSizes(SurfaceTexture::class.java)
+
+        // Find the largest preview size that is no bigger than 1080p
+//        return outputSizes.filter { it.width <= 1920 && it.height <= 1080 }
+//            .maxByOrNull { it.width.toLong() * it.height.toLong() } ?: outputSizes[0]
+        // Find the largest preview size that is no bigger than 480p
+        return outputSizes.filter { it.width <= 640 && it.height <= 480 }
+            .maxByOrNull { it.width.toLong() * it.height.toLong() } ?: outputSizes[0]
+    }
+
     private val textureListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
             maybeStartCamera()
@@ -112,7 +127,7 @@ class MainActivity : AppCompatActivity() {
         captureButton.setOnClickListener { takeStereo() }
         captureButton.isEnabled = false
 
-        statusText.text = "Waiting for preview surface…"
+//        statusText.text = "Waiting for preview surface…"
     }
 
     override fun onResume() {
@@ -196,19 +211,18 @@ class MainActivity : AppCompatActivity() {
             val characteristics = cameraManager.getCameraCharacteristics(selected.logicalId)
             sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
 
-//            val size = chooseCommonYuvSize(selected.widePhysicalId, selected.ultraPhysicalId)
             val size = chooseCommonJpegSize(selected.widePhysicalId, selected.ultraPhysicalId)
             stillSize = size
 
             setupImageReaders(size)
 
-            statusText.text = buildString {
-                appendLine("Logical camera: ${selected.logicalId}")
-                appendLine("Wide physical: ${selected.widePhysicalId}")
-                appendLine("Ultra physical: ${selected.ultraPhysicalId}")
-                appendLine("Capture size: ${size.width}x${size.height} (JPEG)")
-//                appendLine("Capture size: ${size.width}x${size.height} (YUV → JPEG)")
-            }
+//            toast(
+//                buildString {
+//                appendLine("Logical camera: ${selected.logicalId}")
+//                appendLine("Wide physical: ${selected.widePhysicalId}")
+//                appendLine("Ultra physical: ${selected.ultraPhysicalId}")
+//                appendLine("Capture size: ${size.width}x${size.height} (JPEG)")
+//            })
 
             if (ActivityCompat.checkSelfPermission(
                     this,
@@ -245,7 +259,6 @@ class MainActivity : AppCompatActivity() {
 
         } catch (e: Exception) {
             Log.e(TAG, "startCamera failed", e)
-            statusText.text = "Error: ${e.message}"
             toast("Start failed: ${e.message}")
         }
     }
@@ -291,7 +304,7 @@ class MainActivity : AppCompatActivity() {
         fun jpegSizes(cameraId: String): List<Size> {
             val chars = cameraManager.getCameraCharacteristics(cameraId)
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return emptyList()
-            // Query for JPEG sizes instead of YUV
+            // Query for JPEG sizes
             val sizes = map.getOutputSizes(ImageFormat.JPEG) ?: return emptyList()
             return sizes.toList()
         }
@@ -340,7 +353,12 @@ class MainActivity : AppCompatActivity() {
         val ch = cameraHandler ?: return
 
         val surfaceTexture = viewFinder.surfaceTexture ?: return
-        surfaceTexture.setDefaultBufferSize(size.width, size.height)
+
+//        surfaceTexture.setDefaultBufferSize(size.width, size.height)
+
+        val previewSize = chooseOptimalPreviewSize(wideId)
+        surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
+
         previewSurface = Surface(surfaceTexture)
 
         val previewConfig = OutputConfiguration(previewSurface!!).apply { setPhysicalCameraId(wideId) }
@@ -359,7 +377,7 @@ class MainActivity : AppCompatActivity() {
                     startPreview()
                     runOnUiThread {
                         captureButton.isEnabled = true
-                        toast("Ready. Hold phone landscape for v0.")
+                        toast("Ready. Hold phone in portrait orientation.")
                     }
                 }
 
@@ -367,7 +385,7 @@ class MainActivity : AppCompatActivity() {
                     session = null
                     runOnUiThread {
                         captureButton.isEnabled = false
-                        toast("Session config failed. Try lowering MAX_STILL_WIDTH/HEIGHT.")
+                        toast("Session config failed.")
                     }
                 }
             }
@@ -439,6 +457,12 @@ class MainActivity : AppCompatActivity() {
 
             // set JPEG quality
             builder.set(CaptureRequest.JPEG_QUALITY, 100.toByte())
+
+            // lens distortion correction
+            builder.set(
+                CaptureRequest.DISTORTION_CORRECTION_MODE,
+                CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
+            )
 
             // make sure it's rotated correctly
             val deviceRotation = display!!.rotation
@@ -538,13 +562,7 @@ class MainActivity : AppCompatActivity() {
 
         runOnUiThread {
             captureButton.isEnabled = true
-            statusText.text = buildString {
-                appendLine("Saved:")
-                appendLine("  ${wideUri ?: "wide failed"}")
-                appendLine("  ${ultraUri ?: "ultra failed"}")
-                appendLine("Δt = ${"%.2f".format(deltaMs)} ms")
-            }
-            toast("Saved stereo pair (Δt ${"%.2f".format(deltaMs)} ms)")
+            toast("Δt = ${"%.2f".format(deltaMs)} ms")
         }
     }
 
@@ -593,7 +611,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun toast(msg: String) {
         runOnUiThread {
-            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+            // Cancel any previous message-clearing callbacks
+            uiHandler.removeCallbacksAndMessages(null)
+            // Set the new message
+            statusText.text = msg
+            // Post a new callback to clear the message after 5 seconds
+            uiHandler.postDelayed({
+                // Check if the message is still the one we set before clearing it
+                if (statusText.text == msg) {
+                    statusText.text = "" // Clear the text
+                }
+            }, 5000) // 5000 milliseconds = 5 seconds
         }
     }
+
+
+
 }
