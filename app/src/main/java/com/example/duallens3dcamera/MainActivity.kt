@@ -24,7 +24,6 @@ import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.widget.Button
-import android.widget.ImageButton
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -33,6 +32,15 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
 import kotlin.math.abs
+
+// for cropping, SBS, and EXIF
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Matrix
+import androidx.exifinterface.media.ExifInterface
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 
 class MainActivity : AppCompatActivity() {
 
@@ -45,6 +53,13 @@ class MainActivity : AppCompatActivity() {
         private const val JPEG_CAPTURE_QUALITY = 100
         private const val MAX_LOG_LINES = 20
     }
+
+    // "Keep this fraction of the ultrawide image (center crop), then scale back up to match wide."
+    // Will be computed on start from camera characteristics; fallback constant if unavailable.
+    @Volatile private var ultraKeepFraction = 0.55f
+
+    // properties for datetime exif stuff
+    private var lastCaptureWallTimeMs: Long = 0
 
     private lateinit var viewFinder: TextureView
     private lateinit var captureButton: Button
@@ -180,6 +195,10 @@ class MainActivity : AppCompatActivity() {
             logicalCameraId = selected.logicalId
             widePhysicalId = selected.widePhysicalId
             ultraPhysicalId = selected.ultraPhysicalId
+
+            // crop prep
+            ultraKeepFraction = computeUltraKeepFraction(selected.widePhysicalId, selected.ultraPhysicalId)
+            updateLog("Ultra keep fraction: ${"%.3f".format(ultraKeepFraction)}")
 
             val characteristics = cameraManager.getCameraCharacteristics(selected.logicalId)
             // figure out the canonical sensor orientation
@@ -317,7 +336,8 @@ class MainActivity : AppCompatActivity() {
 
         val wideConfig = OutputConfiguration(w.surface).apply { setPhysicalCameraId(wideId) }
         val ultraConfig = OutputConfiguration(u.surface).apply { setPhysicalCameraId(ultraId) }
-        val previewConfig = OutputConfiguration(previewSurface!!)
+        // set preview to be the wide camera
+        val previewConfig = OutputConfiguration(previewSurface!!).apply { setPhysicalCameraId(wideId) }
 
         val sessionConfig = SessionConfiguration(
             SessionConfiguration.SESSION_REGULAR,
@@ -388,6 +408,11 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun takeStereo() {
+
+        // will be used for datetime EXIF later
+        lastCaptureWallTimeMs = System.currentTimeMillis()
+//        lastCaptureMonoTimeNs = System.nanoTime()
+
         val cam = cameraDevice ?: run { updateLog("Camera not ready"); return }
         val s = session ?: run { updateLog("Session not ready"); return }
         val wideId = widePhysicalId ?: run { updateLog("No wide id"); return }
@@ -419,6 +444,12 @@ class MainActivity : AppCompatActivity() {
             builder.set(CaptureRequest.JPEG_QUALITY, JPEG_CAPTURE_QUALITY.toByte())
             // lens distortion correction (highest quality)
             builder.set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
+
+            // Make sure torch stays on during photo capture also.
+            // Otherwise, it blinks off.
+            if (isTorchOn) {
+                builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+            }
 
             // make sure it's rotated correctly
             val deviceRotation = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
@@ -461,6 +492,57 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {}
     }
 
+    // for cropping
+    private fun computeUltraKeepFraction(wideId: String, ultraId: String): Float {
+        val w = cameraManager.getCameraCharacteristics(wideId)
+        val u = cameraManager.getCameraCharacteristics(ultraId)
+
+        // Preferred: intrinsics (if present). Gives fx in pixels; ratio tells us zoom needed.
+        val wIntr = w.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
+        val uIntr = u.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
+        val wActive = w.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        val uActive = u.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+
+        if (wIntr != null && uIntr != null && wActive != null && uActive != null &&
+            wIntr.size >= 2 && uIntr.size >= 2
+        ) {
+            val fxW = wIntr[0] / wActive.width().toFloat()
+            val fyW = wIntr[1] / wActive.height().toFloat()
+            val fxU = uIntr[0] / uActive.width().toFloat()
+            val fyU = uIntr[1] / uActive.height().toFloat()
+
+            val keepX = fxU / fxW
+            val keepY = fyU / fyW
+
+            // Conservative: choose the smaller keep so UW won't remain wider in either axis
+            val keep = minOf(keepX, keepY).toFloat()
+
+            return keep.coerceIn(0.25f, 0.95f)
+        }
+
+        // Fallback: focal length + physical sensor size.
+        val wF = w.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.minOrNull()
+        val uF = u.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.minOrNull()
+        val wPhys = w.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        val uPhys = u.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+
+        if (wF != null && uF != null && wPhys != null && uPhys != null) {
+            val fxW = wF / wPhys.width
+            val fyW = wF / wPhys.height
+            val fxU = uF / uPhys.width
+            val fyU = uF / uPhys.height
+
+            val keepX = fxU / fxW
+            val keepY = fyU / fyW
+
+            val keep = minOf(keepX, keepY).toFloat()
+            return keep.coerceIn(0.25f, 0.95f)
+        }
+
+        // Last resort constant you can tune manually
+        return 0.55f
+    }
+
     private fun handleImage(isWide: Boolean, image: Image) {
         val buffer = image.planes[0].buffer
         val jpegBytes = ByteArray(buffer.remaining())
@@ -475,6 +557,13 @@ class MainActivity : AppCompatActivity() {
             if (!captureArmed) return
             if (isWide) pendingWide = JpegResult(jpegBytes, ts) else pendingUltra = JpegResult(jpegBytes, ts)
             if (pendingWide != null && pendingUltra != null) {
+
+                // READY TO TAKE PHOTO AGAIN!
+                // UNLOCK SHUTTER BUTTON
+                runOnUiThread {
+                    captureButton.isEnabled = true
+                }
+
                 captureArmed = false
                 toSaveWide = pendingWide
                 toSaveUltra = pendingUltra
@@ -488,20 +577,134 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun savePair(wide: JpegResult, ultra: JpegResult) {
+
         val deltaMs = abs(wide.timestampNs - ultra.timestampNs) / 1_000_000.0
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-        val base = "Stereo_${stamp}"
 
-        saveJpeg("${base}_WIDE.jpg", wide.bytes)
-        saveJpeg("${base}_ULTRA.jpg", ultra.bytes)
+        // Use the accurate wall-clock time we saved for the filename
+        val stamp = SimpleDateFormat("yyyy_MM_dd_HH_mm_ss_SSS", Locale.US).format(Date(lastCaptureWallTimeMs))
+        val base = stamp
 
-        runOnUiThread {
-            captureButton.isEnabled = true
+//        // save individual shots without crop
+//        saveJpeg("${base}_WIDE.jpg", wide.bytes)
+//        saveJpeg("${base}_ULTRA.jpg", ultra.bytes)
+//        updateLog("Saved: $base (Δt ${"%.4f".format(deltaMs)} ms)")
+
+        // SBS output!
+        try {
+            val sbsBytes = buildFullResSbsJpeg(
+                wideJpeg = wide.bytes,
+                ultraJpeg = ultra.bytes,
+                ultraKeep = ultraKeepFraction
+            )
+//            saveJpeg("${base}.jpg", sbsBytes, wide.timestampNs)
+            saveJpeg("${base}.jpg", sbsBytes, lastCaptureWallTimeMs)
             updateLog("Saved: $base (Δt ${"%.4f".format(deltaMs)} ms)")
+        } catch (oom: OutOfMemoryError) {
+            Log.e(TAG, "OOM building SBS", oom)
+            updateLog("SBS failed (OOM). Consider RGB_565 + region decode or smaller SBS.")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed building SBS", t)
+            updateLog("SBS failed: ${t.message}")
         }
+
     }
 
-    private fun saveJpeg(filename: String, bytes: ByteArray) {
+    private fun buildFullResSbsJpeg(wideJpeg: ByteArray, ultraJpeg: ByteArray, ultraKeep: Float): ByteArray {
+        // Decode BOTH as RGB_565 to reduce memory (huge difference for full-res SBS)
+        val wideBmp = decodeJpegUpright(wideJpeg, prefer565 = true)
+        val ultraBmp = decodeJpegUpright(ultraJpeg, prefer565 = true)
+
+        // Crop ultrawide center to match wide framing and scale to wide size
+        val ultraMatched = cropUltraToMatchWide(ultraBmp, wideBmp.width, wideBmp.height, ultraKeep)
+
+        // Stitch SBS full-res
+        val out = Bitmap.createBitmap(wideBmp.width * 2, wideBmp.height, Bitmap.Config.RGB_565)
+        val canvas = Canvas(out)
+        canvas.drawBitmap(wideBmp, 0f, 0f, null)
+        canvas.drawBitmap(ultraMatched, wideBmp.width.toFloat(), 0f, null)
+
+        // Encode
+        val baos = ByteArrayOutputStream()
+        // output SBS jpg with 100% quality
+        out.compress(Bitmap.CompressFormat.JPEG, 100, baos)
+
+        // Cleanup aggressively
+        wideBmp.recycle()
+        ultraBmp.recycle()
+        ultraMatched.recycle()
+        out.recycle()
+
+        return baos.toByteArray()
+    }
+
+    private fun cropUltraToMatchWide(srcUltra: Bitmap, wideW: Int, wideH: Int, keepFraction: Float): Bitmap {
+        val keep = keepFraction.coerceIn(0.25f, 0.95f)
+
+        val srcW = srcUltra.width
+        val srcH = srcUltra.height
+        val wideAspect = wideW.toFloat() / wideH.toFloat()
+
+        // Start with width-based crop, then enforce aspect ratio
+        var cropW = (srcW * keep).toInt().coerceIn(1, srcW)
+        var cropH = (cropW / wideAspect).toInt()
+
+        if (cropH > srcH) {
+            cropH = (srcH * keep).toInt().coerceIn(1, srcH)
+            cropW = (cropH * wideAspect).toInt().coerceIn(1, srcW)
+        }
+
+        val left = ((srcW - cropW) / 2).coerceAtLeast(0)
+        val top = ((srcH - cropH) / 2).coerceAtLeast(0)
+
+        val cropped = Bitmap.createBitmap(srcUltra, left, top, cropW, cropH)
+
+        // Scale to match wide exactly
+        val scaled = Bitmap.createScaledBitmap(cropped, wideW, wideH, true)
+        if (scaled != cropped) cropped.recycle()
+
+        return scaled
+    }
+
+    private fun decodeJpegUpright(jpeg: ByteArray, prefer565: Boolean): Bitmap {
+        val opts = BitmapFactory.Options().apply {
+            inPreferredConfig = if (prefer565) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888
+            inDither = prefer565
+        }
+
+        val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)
+            ?: throw IllegalStateException("decodeByteArray failed")
+
+        // Some devices rotate pixels; others set EXIF orientation.
+        // We handle EXIF so output is always upright.
+        val exif = ExifInterface(ByteArrayInputStream(jpeg))
+        val orientation = exif.getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL
+        )
+        return applyExifOrientation(bmp, orientation)
+    }
+
+    private fun applyExifOrientation(src: Bitmap, orientation: Int): Bitmap {
+        if (orientation == ExifInterface.ORIENTATION_NORMAL) return src
+
+        val m = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.preScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.preScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> { m.postRotate(90f); m.preScale(-1f, 1f) }
+            ExifInterface.ORIENTATION_TRANSVERSE -> { m.postRotate(270f); m.preScale(-1f, 1f) }
+            else -> return src
+        }
+
+        val out = Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+        if (out != src) src.recycle()
+        return out
+    }
+
+    private fun saveJpeg(filename: String, bytes: ByteArray, captureTimeMs: Long) {
         val resolver = contentResolver
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
@@ -514,6 +717,28 @@ class MainActivity : AppCompatActivity() {
             uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
                 ?: throw Exception("MediaStore insert failed")
             resolver.openOutputStream(uri).use { it?.write(bytes) }
+
+            // BEGIN - Add Date Taken meta to jpeg
+            resolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val exif = ExifInterface(pfd.fileDescriptor)
+
+                // Use the wall-clock time passed directly into this function.
+                val dateTime = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date(captureTimeMs))
+                val subSec = (captureTimeMs % 1000).toString().padStart(3, '0')
+
+                // Set the EXIF tags
+                exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, dateTime) // Date Taken
+                exif.setAttribute(ExifInterface.TAG_DATETIME_DIGITIZED, dateTime) // Date Digitized
+                exif.setAttribute(ExifInterface.TAG_SUBSEC_TIME_ORIGINAL, subSec)
+                exif.setAttribute(ExifInterface.TAG_SUBSEC_TIME_DIGITIZED, subSec)
+
+                exif.setAttribute(ExifInterface.TAG_MAKE, android.os.Build.MANUFACTURER)
+                exif.setAttribute(ExifInterface.TAG_MODEL, android.os.Build.MODEL)
+
+                exif.saveAttributes()
+            }
+            // END - Add Date Taken meta to jpegs
+
         } catch (e: Exception) {
             Log.e(TAG, "Save failed for $filename", e)
             if (uri != null) resolver.delete(uri, null, null)
