@@ -200,6 +200,19 @@ class MainActivity : AppCompatActivity() {
             ultraKeepFraction = computeUltraKeepFraction(selected.widePhysicalId, selected.ultraPhysicalId)
             updateLog("Ultra keep fraction: ${"%.3f".format(ultraKeepFraction)}")
 
+            // just debug logging
+//            val wChars = cameraManager.getCameraCharacteristics(selected.widePhysicalId)
+//            val uChars = cameraManager.getCameraCharacteristics(selected.ultraPhysicalId)
+//
+//            val wPre = wChars.get(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE)
+//            val wAct = wChars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+//
+//            val uPre = uChars.get(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE)
+//            val uAct = uChars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+//
+//            updateLog("W pre=$wPre act=$wAct")
+//            updateLog("U pre=$uPre act=$uAct")
+
             val characteristics = cameraManager.getCameraCharacteristics(selected.logicalId)
             // figure out the canonical sensor orientation
             sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
@@ -411,7 +424,6 @@ class MainActivity : AppCompatActivity() {
 
         // will be used for datetime EXIF later
         lastCaptureWallTimeMs = System.currentTimeMillis()
-//        lastCaptureMonoTimeNs = System.nanoTime()
 
         val cam = cameraDevice ?: run { updateLog("Camera not ready"); return }
         val s = session ?: run { updateLog("Session not ready"); return }
@@ -444,6 +456,7 @@ class MainActivity : AppCompatActivity() {
             builder.set(CaptureRequest.JPEG_QUALITY, JPEG_CAPTURE_QUALITY.toByte())
             // lens distortion correction (highest quality)
             builder.set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
+//            builder.set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_OFF)
 
             // Make sure torch stays on during photo capture also.
             // Otherwise, it blinks off.
@@ -473,6 +486,26 @@ class MainActivity : AppCompatActivity() {
                     synchronized(pairLock) { captureArmed = false }
                     runOnUiThread { captureButton.isEnabled = true }
                 }
+//                // new debug for cropping
+//                override fun onCaptureCompleted(
+//                    session: CameraCaptureSession,
+//                    request: CaptureRequest,
+//                    result: TotalCaptureResult
+//                ) {
+//                    val wideId = widePhysicalId ?: return
+//                    val ultraId = ultraPhysicalId ?: return
+//
+//                    val phys = result.physicalCameraTotalResults  // map: physicalId -> TotalCaptureResult
+//
+//                    val wRes = phys[wideId]
+//                    val uRes = phys[ultraId]
+//
+//                    val wCrop = wRes?.get(CaptureResult.SCALER_CROP_REGION)
+//                    val uCrop = uRes?.get(CaptureResult.SCALER_CROP_REGION)
+//
+////                    updateLog("W:$wCrop;U$uCrop")
+//                    updateLog("U$uCrop")
+//                }
             }, cameraHandler)
 
         } catch (e: Exception) {
@@ -494,53 +527,82 @@ class MainActivity : AppCompatActivity() {
 
     // for cropping
     private fun computeUltraKeepFraction(wideId: String, ultraId: String): Float {
+
+        // not cropping right
         val w = cameraManager.getCameraCharacteristics(wideId)
         val u = cameraManager.getCameraCharacteristics(ultraId)
+//
+//        // Preferred: intrinsics (if present). Gives fx in pixels; ratio tells us zoom needed.
+//        val wIntr = w.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
+//        val uIntr = u.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
+//        val wActive = w.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+//        val uActive = u.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+//
+//        if (wIntr != null && uIntr != null && wActive != null && uActive != null &&
+//            wIntr.size >= 2 && uIntr.size >= 2
+//        ) {
+//            val fxW = wIntr[0] / wActive.width().toFloat()
+//            val fyW = wIntr[1] / wActive.height().toFloat()
+//            val fxU = uIntr[0] / uActive.width().toFloat()
+//            val fyU = uIntr[1] / uActive.height().toFloat()
+//
+//            val keepX = fxU / fxW
+//            val keepY = fyU / fyW
+//
+//            // Conservative: choose the smaller keep so UW won't remain wider in either axis
+//            val keep = minOf(keepX, keepY).toFloat()
+//
+//            return keep.coerceIn(0.25f, 0.95f)
+//        }
 
-        // Preferred: intrinsics (if present). Gives fx in pixels; ratio tells us zoom needed.
-        val wIntr = w.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
-        val uIntr = u.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
-        val wActive = w.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
-        val uActive = u.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+//        // new try with SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE
+//        // still not cropping right
+//        val w = cameraManager.getCameraCharacteristics(wideId)
+//        val u = cameraManager.getCameraCharacteristics(ultraId)
+//
+//        val wIntr = w.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
+//        val uIntr = u.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
+//
+//        // Intrinsics are in PRE_CORRECTION coordinates (per docs)
+//        val wPre = w.get(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE)
+//        val uPre = u.get(CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE)
+//
+//        if (wIntr != null && uIntr != null && wPre != null && uPre != null &&
+//            wIntr.size >= 2 && uIntr.size >= 2
+//        ) {
+//            val fxWn = wIntr[0] / wPre.width().toFloat()
+//            val fyWn = wIntr[1] / wPre.height().toFloat()
+//            val fxUn = uIntr[0] / uPre.width().toFloat()
+//            val fyUn = uIntr[1] / uPre.height().toFloat()
+//
+//            val keepX = fxUn / fxWn
+//            val keepY = fyUn / fyWn
+//
+//            return minOf(keepX, keepY).coerceIn(0.25f, 0.95f)
+//        }
 
-        if (wIntr != null && uIntr != null && wActive != null && uActive != null &&
-            wIntr.size >= 2 && uIntr.size >= 2
-        ) {
-            val fxW = wIntr[0] / wActive.width().toFloat()
-            val fyW = wIntr[1] / wActive.height().toFloat()
-            val fxU = uIntr[0] / uActive.width().toFloat()
-            val fyU = uIntr[1] / uActive.height().toFloat()
-
-            val keepX = fxU / fxW
-            val keepY = fyU / fyW
-
-            // Conservative: choose the smaller keep so UW won't remain wider in either axis
-            val keep = minOf(keepX, keepY).toFloat()
-
-            return keep.coerceIn(0.25f, 0.95f)
-        }
-
-        // Fallback: focal length + physical sensor size.
-        val wF = w.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.minOrNull()
-        val uF = u.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.minOrNull()
-        val wPhys = w.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
-        val uPhys = u.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
-
-        if (wF != null && uF != null && wPhys != null && uPhys != null) {
-            val fxW = wF / wPhys.width
-            val fyW = wF / wPhys.height
-            val fxU = uF / uPhys.width
-            val fyU = uF / uPhys.height
-
-            val keepX = fxU / fxW
-            val keepY = fyU / fyW
-
-            val keep = minOf(keepX, keepY).toFloat()
-            return keep.coerceIn(0.25f, 0.95f)
-        }
+//        // Fallback: focal length + physical sensor size.
+//        val wF = w.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.minOrNull()
+//        val uF = u.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.minOrNull()
+//        val wPhys = w.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+//        val uPhys = u.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+//
+//        if (wF != null && uF != null && wPhys != null && uPhys != null) {
+//            val fxW = wF / wPhys.width
+//            val fyW = wF / wPhys.height
+//            val fxU = uF / uPhys.width
+//            val fyU = uF / uPhys.height
+//
+//            val keepX = fxU / fxW
+//            val keepY = fyU / fyW
+//
+//            val keep = minOf(keepX, keepY).toFloat()
+//            return keep.coerceIn(0.25f, 0.95f)
+//        }
 
         // Last resort constant you can tune manually
-        return 0.55f
+//        return 0.55f
+        return 0.59f
     }
 
     private fun handleImage(isWide: Boolean, image: Image) {
@@ -585,8 +647,8 @@ class MainActivity : AppCompatActivity() {
         val base = stamp
 
 //        // save individual shots without crop
-//        saveJpeg("${base}_WIDE.jpg", wide.bytes)
-//        saveJpeg("${base}_ULTRA.jpg", ultra.bytes)
+//        saveJpeg("${base}_WIDE.jpg", wide.bytes, lastCaptureWallTimeMs)
+//        saveJpeg("${base}_ULTRA.jpg", ultra.bytes, lastCaptureWallTimeMs)
 //        updateLog("Saved: $base (Δt ${"%.4f".format(deltaMs)} ms)")
 
         // SBS output!
@@ -620,8 +682,10 @@ class MainActivity : AppCompatActivity() {
         // Stitch SBS full-res
         val out = Bitmap.createBitmap(wideBmp.width * 2, wideBmp.height, Bitmap.Config.RGB_565)
         val canvas = Canvas(out)
-        canvas.drawBitmap(wideBmp, 0f, 0f, null)
-        canvas.drawBitmap(ultraMatched, wideBmp.width.toFloat(), 0f, null)
+//        canvas.drawBitmap(wideBmp, 0f, 0f, null)
+//        canvas.drawBitmap(ultraMatched, wideBmp.width.toFloat(), 0f, null)
+        canvas.drawBitmap(ultraMatched, 0f, 0f, null)
+        canvas.drawBitmap(wideBmp, wideBmp.width.toFloat(), 0f, null)
 
         // Encode
         val baos = ByteArrayOutputStream()
