@@ -1,3 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Dual Lens 3D Camera</string>
+<string name="app_name">Dual Lens 3D Camera</string>
+
+<string name="format_jpg">PHOTO: JPG</string>
+<string name="format_dng">PHOTO: DNG</string>
+
+<string name="torch_on">Torch ON</string>
+<string name="torch_off">Torch OFF</string>
+
+<string name="photo">PHOTO</string>
+<string name="record">RECORD</string>
+<string name="stop">STOP</string>
 </resources>
