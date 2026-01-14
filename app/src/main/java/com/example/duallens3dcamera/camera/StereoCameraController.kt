@@ -59,7 +59,8 @@ class StereoCameraController(
         private const val ULTRA_PHYSICAL_ID = "3"
 
 //        private val PREFERRED_RECORD_SIZE = Size(1920, 1440)
-        private val PREFERRED_RECORD_SIZE = Size(4000, 3000)
+//        private val PREFERRED_RECORD_SIZE = Size(4000, 3000)
+        private val PREFERRED_RECORD_SIZE = Size(1440, 1080)
         private const val TARGET_FPS = 30
 
         // Video knobs (easy to tweak in one place)
@@ -97,7 +98,8 @@ class StereoCameraController(
     private var displayRotation: Int = Surface.ROTATION_0
 
     private var recordSize: Size = PREFERRED_RECORD_SIZE
-    private var previewSize: Size = Size(1280, 960)
+//    private var previewSize: Size = Size(1280, 960)
+    private var previewSize: Size = Size(800, 600)
 
 //    private var jpegSize: Size = PREFERRED_RECORD_SIZE
     private var jpegWideSize: Size = PREFERRED_RECORD_SIZE
@@ -516,11 +518,11 @@ class StereoCameraController(
 //            callback.onFallbackSizeUsed(it)
 //        }
 
-        previewSize = SizeSelector.choosePreviewFourByThree(
-            wideMap = wMap,
-            maxW = minOf(1280, recordSize.width),
-            maxH = minOf(960, recordSize.height)
-        )
+//        previewSize = SizeSelector.choosePreviewFourByThree(
+//            wideMap = wMap,
+//            maxW = minOf(1280, recordSize.width),
+//            maxH = minOf(960, recordSize.height)
+//        )
 
 
         jpegWideSize = SizeSelector.chooseLargestJpegFourByThree(wMap)
