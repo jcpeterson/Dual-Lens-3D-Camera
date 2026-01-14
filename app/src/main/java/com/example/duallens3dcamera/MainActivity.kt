@@ -49,6 +49,13 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
 
     private var previewConfig: StereoCameraController.PreviewConfig? = null
 
+    // for ensuring the preview always has the right aspect
+    @Volatile private var reapplyTransformOnNextFrame = false
+    private fun requestPreviewTransformReapply() {
+        reapplyTransformOnNextFrame = true
+    }
+
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
@@ -105,6 +112,7 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
             savePrefs()
             updateFormatButton()
             controller.setPhotoOutputRaw(rawMode)
+            requestPreviewTransformReapply() // make sure preview still has the right aspect
         }
 
         binding.btnTorch.setOnClickListener {
@@ -120,6 +128,7 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
             updateUi()
             val ts = timestampForFilename()
             controller.captureStereoPhoto(ts, rawMode)
+            requestPreviewTransformReapply() // make sure preview still has the right aspect
         }
 
         binding.btnRecord.setOnClickListener {
@@ -158,7 +167,14 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
                 return true
             }
 
-            override fun onSurfaceTextureUpdated(surface: android.graphics.SurfaceTexture) = Unit
+//            override fun onSurfaceTextureUpdated(surface: android.graphics.SurfaceTexture) = Unit
+            override fun onSurfaceTextureUpdated(surface: android.graphics.SurfaceTexture) {
+                if (reapplyTransformOnNextFrame) {
+                    reapplyTransformOnNextFrame = false
+                    configureTransform(binding.textureView.width, binding.textureView.height)
+                }
+            }
+
         }
     }
 
@@ -374,6 +390,7 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         isBusy = false
         isRecording = true
         updateUi()
+        requestPreviewTransformReapply() // make sure preview still has the right aspect
     }
 
     override fun onRecordingStopped() = onUi {
