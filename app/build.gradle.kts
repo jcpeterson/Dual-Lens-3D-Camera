@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.duallens3dcamera"
         minSdk = 30
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2"
+        versionCode = 3
+        versionName = "0.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
