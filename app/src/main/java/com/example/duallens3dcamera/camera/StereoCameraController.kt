@@ -576,6 +576,10 @@ class StereoCameraController(
     }
 
     private fun createPreviewSession() {
+
+        // make sure preview aspect doesn't get messed up
+        surfaceTexture?.setDefaultBufferSize(previewSize.width, previewSize.height)
+
         val camera = cameraDevice ?: return
         val handler = requireNotNull(cameraHandler)
         val preview = previewSurface ?: return
@@ -643,6 +647,10 @@ class StereoCameraController(
     }
 
     private fun createRecordingSession() {
+
+        // make sure preview aspect doesn't get messed up
+        surfaceTexture?.setDefaultBufferSize(previewSize.width, previewSize.height)
+
         val camera = cameraDevice ?: return
         val handler = requireNotNull(cameraHandler)
         val preview = previewSurface ?: return
@@ -965,18 +973,20 @@ class StereoCameraController(
     }
 
     private fun applyCommonNoCropNoStab(builder: CaptureRequest.Builder, isVideo: Boolean) {
-//        builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
-//        builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
 
         // EIS toggle (video only)
         if (isVideo && eisEnabled) {
             builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+            // Might as well do OIS if EIS is on even though Pixel 7 ultrawide in particular can't do it.
+            // Not sure OIS off requests are allowed anyway. Likely not.
+            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
         } else {
             builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
         }
 
         // Keep OIS OFF always
-        builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+//        builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
 
         builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(TARGET_FPS, TARGET_FPS))
 
