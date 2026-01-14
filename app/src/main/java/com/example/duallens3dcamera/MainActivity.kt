@@ -357,9 +357,11 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
     }
 
     private fun timestampForFilename(): String {
-        val sdf = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.US)
+        // ms needed to avoid collisions when shooting multiple times in the same second.
+        val sdf = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
         return sdf.format(Date())
     }
+
 
     private fun toastOnUi(msg: String) {
         if (Looper.myLooper() == Looper.getMainLooper()) {

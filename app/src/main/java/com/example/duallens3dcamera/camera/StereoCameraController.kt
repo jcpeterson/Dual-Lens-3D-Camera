@@ -53,13 +53,11 @@ class StereoCameraController(
     companion object {
         private const val TAG = "StereoCameraController"
 
-        // Pixel 7 guidance (hardcoded)
+        // Pixel-based guidance (hardcoded)
         private const val LOGICAL_REAR_ID = "0"
         private const val WIDE_PHYSICAL_ID = "2"
         private const val ULTRA_PHYSICAL_ID = "3"
 
-//        private val PREFERRED_RECORD_SIZE = Size(1920, 1440)
-//        private val PREFERRED_RECORD_SIZE = Size(4000, 3000)
         private val PREFERRED_RECORD_SIZE = Size(1440, 1080)
         private const val TARGET_FPS = 30
 
@@ -71,6 +69,10 @@ class StereoCameraController(
         private const val AUDIO_SAMPLE_RATE = 48_000
         private const val AUDIO_CHANNELS = 1
         private const val AUDIO_BITRATE_BPS = 128_000
+
+        // maxes for spamming the shutter button
+        private const val JPEG_MAX_IMAGES = 8
+        private const val RAW_MAX_IMAGES = 3
     }
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -101,7 +103,6 @@ class StereoCameraController(
 //    private var previewSize: Size = Size(1280, 960)
     private var previewSize: Size = Size(800, 600)
 
-//    private var jpegSize: Size = PREFERRED_RECORD_SIZE
     private var jpegWideSize: Size = PREFERRED_RECORD_SIZE
     private var jpegUltraSize: Size = PREFERRED_RECORD_SIZE
 
@@ -112,7 +113,7 @@ class StereoCameraController(
     private var torchOn: Boolean = false
     private var isRecording: Boolean = false
 
-    // NEW: mutable video config (set from UI, persisted in Activity)
+    // mutable video config (set from UI, persisted in Activity)
     private var requestedRecordSize: Size = Size(1440, 1080)  // default corresponds to upright 1080x1440
     private var videoBitrateBps: Int = 50_000_000             // default 50 Mbps
     private var eisEnabled: Boolean = false                   // default OFF
@@ -504,49 +505,14 @@ class StereoCameraController(
 
         recomputeRecordSizeLocked()
 
-//        val (chosenRecord, fallbackMsg) = SizeSelector.chooseCommonFourByThreeSizeAt30FpsPrivate(
-//            wideMap = wMap,
-//            ultraMap = uMap,
-//            preferred = PREFERRED_RECORD_SIZE,
-//            maxW = PREFERRED_RECORD_SIZE.width,
-//            maxH = PREFERRED_RECORD_SIZE.height,
-//            targetFps = TARGET_FPS
-//        )
-//        recordSize = chosenRecord
-//        fallbackMsg?.let {
-//            Log.w(TAG, it)
-//            callback.onFallbackSizeUsed(it)
-//        }
-
-//        previewSize = SizeSelector.choosePreviewFourByThree(
-//            wideMap = wMap,
-//            maxW = minOf(1280, recordSize.width),
-//            maxH = minOf(960, recordSize.height)
-//        )
-
-
         jpegWideSize = SizeSelector.chooseLargestJpegFourByThree(wMap)
         jpegUltraSize = SizeSelector.chooseLargestJpegFourByThree(uMap)
 
         Log.i(TAG, "JPEG wide=${jpegWideSize.width}x${jpegWideSize.height}, ultra=${jpegUltraSize.width}x${jpegUltraSize.height}")
 
-//        val (chosenJpeg, jpegMsg) = SizeSelector.chooseCommonJpegFourByThree(
-//            wideMap = wMap,
-//            ultraMap = uMap,
-//            maxW = recordSize.width,
-//            maxH = recordSize.height,
-//            preferred = recordSize
-//        )
-//        jpegSize = chosenJpeg
-//        jpegMsg?.let {
-//            Log.w(TAG, it)
-//            callback.onFallbackSizeUsed(it)
-//        }
-
         rawWideSize = SizeSelector.chooseLargestRaw(wMap)
         rawUltraSize = SizeSelector.chooseLargestRaw(uMap)
 
-//        Log.i(TAG, "Record=${recordSize.width}x${recordSize.height} Preview=${previewSize.width}x${previewSize.height} JPEG=${jpegSize.width}x${jpegSize.height}")
     }
 
     private fun openCamera() {
@@ -607,10 +573,12 @@ class StereoCameraController(
             Triple(ImageFormat.JPEG, jpegWideSize, jpegUltraSize)
         }
 
-        wideReader = ImageReader.newInstance(wideSize.width, wideSize.height, format, 2).apply {
+        val maxImages = if (format == ImageFormat.RAW_SENSOR) RAW_MAX_IMAGES else JPEG_MAX_IMAGES
+
+        wideReader = ImageReader.newInstance(wideSize.width, wideSize.height, format, maxImages).apply {
             setOnImageAvailableListener({ reader -> onStillImageAvailable(isWide = true, reader = reader) }, handler)
         }
-        ultraReader = ImageReader.newInstance(ultraSize.width, ultraSize.height, format, 2).apply {
+        ultraReader = ImageReader.newInstance(ultraSize.width, ultraSize.height, format, maxImages).apply {
             setOnImageAvailableListener({ reader -> onStillImageAvailable(isWide = false, reader = reader) }, handler)
         }
 
@@ -827,11 +795,15 @@ class StereoCameraController(
         val ultraImg = cap.ultraImage
         val result = cap.totalResult
 
-        val ready = if (cap.isRaw) (wideImg != null && ultraImg != null && result != null)
-        else (wideImg != null && ultraImg != null)
+        val ready = if (cap.isRaw) {
+            (wideImg != null && ultraImg != null && result != null)
+        } else {
+            (wideImg != null && ultraImg != null)
+        }
 
         if (!ready) return
 
+        // Detach this capture so UI/camera can proceed immediately.
         cap.finished = true
         currentPhoto = null
 
@@ -840,45 +812,76 @@ class StereoCameraController(
         val exifDt = cap.exifDateTimeOriginal
         val isRaw = cap.isRaw
 
-        ioExecutor.execute {
-            val resolver = context.contentResolver
-            try {
-                if (isRaw) {
-                    val wideCharacteristics = requireNotNull(wideChars)
-                    val ultraCharacteristics = requireNotNull(ultraChars)
-                    val total = requireNotNull(result)
+        // IMPORTANT: free UI immediately (saving continues in background)
+        callback.onPhotoCaptureDone()
 
-                    saveDng(wideUri, wideCharacteristics, total, requireNotNull(wideImg), exifDt)
-                    saveDng(ultraUri, ultraCharacteristics, total, requireNotNull(ultraImg), exifDt)
-                } else {
-                    saveJpeg(wideUri, requireNotNull(wideImg), exifDt)
-                    saveJpeg(ultraUri, requireNotNull(ultraImg), exifDt)
-                }
+        val resolver = context.contentResolver
 
-                MediaStoreUtils.finalizePending(resolver, wideUri)
-                MediaStoreUtils.finalizePending(resolver, ultraUri)
-
-                callback.onPhotoCaptureDone()
-            } catch (e: Exception) {
-                Log.e(TAG, "Photo save failed: ${e.message}", e)
-                MediaStoreUtils.delete(resolver, wideUri)
-                MediaStoreUtils.delete(resolver, ultraUri)
-                callback.onError("Photo save failed: ${e.message}")
-                callback.onPhotoCaptureDone()
+        if (!isRaw) {
+            // --- JPEG path: copy bytes now, close Images NOW (frees buffers) ---
+            val wideBytes = try {
+                imageToBytes(requireNotNull(wideImg))
             } finally {
                 try { wideImg?.close() } catch (_: Exception) {}
+            }
+
+            val ultraBytes = try {
+                imageToBytes(requireNotNull(ultraImg))
+            } finally {
                 try { ultraImg?.close() } catch (_: Exception) {}
+            }
+
+            ioExecutor.execute {
+                try {
+                    saveJpegBytes(wideUri, wideBytes, exifDt)
+                    saveJpegBytes(ultraUri, ultraBytes, exifDt)
+
+                    MediaStoreUtils.finalizePending(resolver, wideUri)
+                    MediaStoreUtils.finalizePending(resolver, ultraUri)
+                } catch (e: Exception) {
+                    Log.e(TAG, "JPEG save failed: ${e.message}", e)
+                    MediaStoreUtils.delete(resolver, wideUri)
+                    MediaStoreUtils.delete(resolver, ultraUri)
+                    callback.onError("JPEG save failed: ${e.message}")
+                }
+            }
+        } else {
+            // --- RAW path: cannot copy; keep Images open for background DNG write ---
+            val wideImage = requireNotNull(wideImg)
+            val ultraImage = requireNotNull(ultraImg)
+            val total = requireNotNull(result)
+
+            ioExecutor.execute {
+                try {
+                    val wideCharacteristics = requireNotNull(wideChars)
+                    val ultraCharacteristics = requireNotNull(ultraChars)
+
+                    saveDng(wideUri, wideCharacteristics, total, wideImage, exifDt)
+                    saveDng(ultraUri, ultraCharacteristics, total, ultraImage, exifDt)
+
+                    MediaStoreUtils.finalizePending(resolver, wideUri)
+                    MediaStoreUtils.finalizePending(resolver, ultraUri)
+                } catch (e: Exception) {
+                    Log.e(TAG, "DNG save failed: ${e.message}", e)
+                    MediaStoreUtils.delete(resolver, wideUri)
+                    MediaStoreUtils.delete(resolver, ultraUri)
+                    callback.onError("DNG save failed: ${e.message}")
+                } finally {
+                    // Close RAW Images only after DngCreator has consumed them.
+                    try { wideImage.close() } catch (_: Exception) {}
+                    try { ultraImage.close() } catch (_: Exception) {}
+                }
             }
         }
     }
 
-    private fun saveJpeg(uri: Uri, image: Image, exifDateTimeOriginal: String) {
-        val bytes = imageToBytes(image)
+    private fun saveJpegBytes(uri: Uri, bytes: ByteArray, exifDateTimeOriginal: String) {
         context.contentResolver.openOutputStream(uri)?.use { os ->
             os.write(bytes)
             os.flush()
         } ?: throw IllegalStateException("openOutputStream failed for $uri")
 
+        // Only required metadata: DateTimeOriginal (and friends)
         setExifDateTimeOriginal(uri, exifDateTimeOriginal)
     }
 
@@ -987,9 +990,6 @@ class StereoCameraController(
             builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
         }
 
-        // Keep OIS OFF always
-//        builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
-
         builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(TARGET_FPS, TARGET_FPS))
 
         if (Build.VERSION.SDK_INT >= 30) {
@@ -998,7 +998,6 @@ class StereoCameraController(
             } catch (_: Exception) {}
         }
 
-//        setFullCrop(builder)
         // If EIS is enabled, don't force full crop region (EIS needs to crop).
         if (!(isVideo && eisEnabled)) {
             setFullCrop(builder)
