@@ -30,6 +30,8 @@ import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 
+import android.hardware.camera2.params.MeteringRectangle
+
 
 class StereoCameraController(
     private val context: Context,
@@ -73,6 +75,13 @@ class StereoCameraController(
         // maxes for spamming the shutter button
         private const val JPEG_MAX_IMAGES = 8
         private const val RAW_MAX_IMAGES = 3
+
+        // Restrict ultrawide AE/AF/AWB decisions to the central 70% of its FoV (trim 30% total).
+//        private const val ULTRA_3A_FRACTION = 0.70f
+        // make it a default instead and overwrite based on lenses found
+        private const val ULTRA_3A_FRACTION_DEFAULT = 0.70f
+        // Computed per device from logical CONTROL_ZOOM_RATIO_RANGE if available; else default.
+        private var ultra3aFraction: Float = ULTRA_3A_FRACTION_DEFAULT
     }
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -80,7 +89,10 @@ class StereoCameraController(
     private var cameraThread: HandlerThread? = null
     private var cameraHandler: Handler? = null
 
-    private val ioExecutor = Executors.newSingleThreadExecutor()
+    // threads so photos can output during shutter spamming
+//    private val ioExecutor = Executors.newSingleThreadExecutor()
+    // two threads instead for jpg/dng output
+    private val ioExecutor = Executors.newFixedThreadPool(2)
     private val encodingExecutor = Executors.newSingleThreadExecutor()
 
     private var cameraDevice: CameraDevice? = null
@@ -481,6 +493,22 @@ class StereoCameraController(
         ultraChars = cameraManager.getCameraCharacteristics(ULTRA_PHYSICAL_ID)
 
         val logical = requireNotNull(logicalChars)
+
+        // Try to derive "wide inside ultrawide" scale from logical zoom-out capability.
+        // On multi-camera devices, logical zoom range often includes < 1.0 for ultrawide.
+        val zoomRange = logical.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+        ultra3aFraction = if (zoomRange != null && zoomRange.lower < 1.0f) {
+            // Slightly conservative so the region stays inside the true overlap.
+            // Clamp to avoid weird vendor ranges.
+            // (zoomRange.lower * 0.95f).coerceIn(0.45f, 0.90f)
+            // less conservative
+            zoomRange.lower.coerceIn(0.45f, 0.90f)
+        } else {
+            ULTRA_3A_FRACTION_DEFAULT
+        }
+        Log.i(TAG, "Ultrawide 3A fraction = $ultra3aFraction (logical zoomRange=$zoomRange)")
+
+
         val wide = requireNotNull(wideChars)
         val ultra = requireNotNull(ultraChars)
 
@@ -977,6 +1005,58 @@ class StereoCameraController(
         }
     }
 
+    private fun centeredRect(active: Rect, fraction: Float): Rect {
+
+        // Creates a new Rect that is centered within the active rectangle and
+        // scaled by the given fraction.
+
+        val f = fraction.coerceIn(0.05f, 1.0f)
+        val w = active.width()
+        val h = active.height()
+
+        val newW = (w * f).toInt().coerceAtLeast(1)
+        val newH = (h * f).toInt().coerceAtLeast(1)
+
+        val left = active.left + (w - newW) / 2
+        val top = active.top + (h - newH) / 2
+
+        val r = Rect(left, top, left + newW, top + newH)
+        r.intersect(active) // safety clamp
+        return r
+    }
+
+    private fun applyUltrawide3ARegions(builder: CaptureRequest.Builder) {
+
+        // constrain ultrawide 3A to overlap-ish center region
+
+        val ultra = ultraChars ?: return
+
+        // Only set regions if supported for that physical camera.
+        val maxAf = ultra.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
+        val maxAe = ultra.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
+        val maxAwb = ultra.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AWB) ?: 0
+
+        if (maxAf <= 0 && maxAe <= 0 && maxAwb <= 0) return
+
+        val active = ultra.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
+//        val rect = centeredRect(active, ULTRA_3A_FRACTION)
+        val rect = centeredRect(active, ultra3aFraction)
+        val region = MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX)
+        val regions = arrayOf(region)
+
+        // set the AF/AE/AWB regions if supported
+        // (number of regions > 0 since we want to use 1 region)
+        if (maxAf > 0) {
+            setPhysical(builder, ULTRA_PHYSICAL_ID, CaptureRequest.CONTROL_AF_REGIONS, regions)
+        }
+        if (maxAe > 0) {
+            setPhysical(builder, ULTRA_PHYSICAL_ID, CaptureRequest.CONTROL_AE_REGIONS, regions)
+        }
+        if (maxAwb > 0) {
+            setPhysical(builder, ULTRA_PHYSICAL_ID, CaptureRequest.CONTROL_AWB_REGIONS, regions)
+        }
+    }
+
     private fun applyCommonNoCropNoStab(builder: CaptureRequest.Builder, isVideo: Boolean) {
 
         // EIS toggle (video only)
@@ -990,7 +1070,13 @@ class StereoCameraController(
             builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
         }
 
-        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(TARGET_FPS, TARGET_FPS))
+        //builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(TARGET_FPS, TARGET_FPS))
+        // potentially more robust, set for both logical AND physical
+        val fpsRange = Range(TARGET_FPS, TARGET_FPS)
+        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+        // Also push the same FPS constraint to both physical cameras.
+        setPhysical(builder, WIDE_PHYSICAL_ID, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+        setPhysical(builder, ULTRA_PHYSICAL_ID, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
 
         if (Build.VERSION.SDK_INT >= 30) {
             try {
@@ -1008,6 +1094,9 @@ class StereoCameraController(
         } catch (_: Exception) {}
 
         builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+
+        // constrain ultrawide 3A to overlap-ish center region
+        applyUltrawide3ARegions(builder)
     }
 
     private fun <T> setPhysical(builder: CaptureRequest.Builder, physicalId: String, key: CaptureRequest.Key<T>, value: T) {
