@@ -19,6 +19,7 @@ import android.util.Range
 import android.util.Size
 import android.view.Surface
 import androidx.exifinterface.media.ExifInterface
+import com.example.duallens3dcamera.util.StereoSbs
 import com.example.duallens3dcamera.encoding.AudioEncoder
 import com.example.duallens3dcamera.encoding.Mp4Muxer
 import com.example.duallens3dcamera.encoding.VideoEncoder
@@ -30,9 +31,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
-
 import android.hardware.camera2.params.MeteringRectangle
-
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CaptureRequest
@@ -108,6 +107,8 @@ class StereoCameraController(
     // two threads instead for jpg/dng output
     private val ioExecutor = Executors.newFixedThreadPool(2)
     private val encodingExecutor = Executors.newSingleThreadExecutor()
+    // Separate thread for SBS alignment/encoding so it never blocks photo IO.
+    private val sbsExecutor = Executors.newSingleThreadExecutor()
 
     private var cameraDevice: CameraDevice? = null
     private var session: CameraCaptureSession? = null
@@ -170,6 +171,7 @@ class StereoCameraController(
         val isRaw: Boolean,
         val wideUri: Uri,
         val ultraUri: Uri,
+        val sbsUri: Uri? = null,
         val exifDateTimeOriginal: String,
         @Volatile var wideImage: Image? = null,
         @Volatile var ultraImage: Image? = null,
@@ -330,10 +332,18 @@ class StereoCameraController(
                 val wideUri = MediaStoreUtils.createPendingImage(context, wideName, wideMime, nowMs)
                 val ultraUri = MediaStoreUtils.createPendingImage(context, ultraName, ultraMime, nowMs)
 
+                val sbsUri = if (!raw) {
+                    val sbsName = "${timestampForFilename}_sbs.jpg"
+                    MediaStoreUtils.createPendingImage(context, sbsName, "image/jpeg", nowMs)
+                } else {
+                    null
+                }
+
                 currentPhoto = PhotoCapture(
                     isRaw = raw,
                     wideUri = wideUri,
                     ultraUri = ultraUri,
+                    sbsUri = sbsUri,
                     exifDateTimeOriginal = exifDt
                 )
 
@@ -1073,6 +1083,7 @@ class StereoCameraController(
 
         val wideUri = cap.wideUri
         val ultraUri = cap.ultraUri
+        val sbsUri = cap.sbsUri
         val exifDt = cap.exifDateTimeOriginal
         val isRaw = cap.isRaw
 
@@ -1102,10 +1113,42 @@ class StereoCameraController(
 
                     MediaStoreUtils.finalizePending(resolver, wideUri)
                     MediaStoreUtils.finalizePending(resolver, ultraUri)
+
+                    // --- SBS output (extra) ---
+                    // Run alignment + SBS JPEG encode on its own thread so it never blocks photo IO.
+                    if (sbsUri != null) {
+                        sbsExecutor.execute {
+                            try {
+                                val sbsBytes = StereoSbs.alignAndCreateSbsJpegBytes(
+                                    wideRightJpeg = wideBytes,     // RIGHT side of SBS
+                                    ultraLeftJpeg = ultraBytes,    // LEFT side of SBS
+                                    // Derived from logical zoom-out capability; only used if ORB/RANSAC fails.
+                                    fallbackUltraOverlapFraction = ultra3aFraction
+                                )
+
+                                if (sbsBytes == null) {
+                                    MediaStoreUtils.delete(resolver, sbsUri)
+                                    return@execute
+                                }
+
+                                // Writes SBS bytes, then writes DateTime EXIF (same helper used for the individual JPEGs)
+                                saveJpegBytes(sbsUri, sbsBytes, exifDt, orientation = PlatformExif.ORIENTATION_NORMAL)
+
+                                MediaStoreUtils.finalizePending(resolver, sbsUri)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "SBS save failed: ${e.message}", e)
+                                MediaStoreUtils.delete(resolver, sbsUri)
+
+                                // Important: don't call onError here (it resets UI state and can conflict with later actions)
+                                callback.onStatus("SBS save failed: ${e.message}")
+                            }
+                        }
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "JPEG save failed: ${e.message}", e)
                     MediaStoreUtils.delete(resolver, wideUri)
                     MediaStoreUtils.delete(resolver, ultraUri)
+                    sbsUri?.let { MediaStoreUtils.delete(resolver, it) }
                     callback.onError("JPEG save failed: ${e.message}")
                 }
             }
@@ -1139,14 +1182,19 @@ class StereoCameraController(
         }
     }
 
-    private fun saveJpegBytes(uri: Uri, bytes: ByteArray, exifDateTimeOriginal: String) {
+    private fun saveJpegBytes(
+        uri: Uri,
+        bytes: ByteArray,
+        exifDateTimeOriginal: String,
+        orientation: Int? = null
+    ) {
         context.contentResolver.openOutputStream(uri)?.use { os ->
             os.write(bytes)
             os.flush()
         } ?: throw IllegalStateException("openOutputStream failed for $uri")
 
-        // Only required metadata: DateTimeOriginal (and friends)
-        setExifDateTimeOriginal(uri, exifDateTimeOriginal)
+        // DateTimeOriginal (+ optionally orientation)
+        setExifDateTimeOriginal(uri, exifDateTimeOriginal, orientation)
     }
 
     private fun saveDng(
@@ -1214,6 +1262,9 @@ class StereoCameraController(
         val resolver = context.contentResolver
         MediaStoreUtils.delete(resolver, cap.wideUri)
         MediaStoreUtils.delete(resolver, cap.ultraUri)
+
+        // so we don’t leave a dangling pending _sbs.jpg entry
+        cap.sbsUri?.let { MediaStoreUtils.delete(resolver, it) }
 
         callback.onPhotoCaptureDone()
     }
