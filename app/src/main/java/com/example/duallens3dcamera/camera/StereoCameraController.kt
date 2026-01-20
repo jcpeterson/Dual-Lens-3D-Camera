@@ -24,6 +24,7 @@ import com.example.duallens3dcamera.encoding.Mp4Muxer
 import com.example.duallens3dcamera.encoding.VideoEncoder
 import com.example.duallens3dcamera.media.MediaStoreUtils
 import com.example.duallens3dcamera.util.SizeSelector
+import com.example.duallens3dcamera.logging.StereoRecordingLogger
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -31,6 +32,12 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 
 import android.hardware.camera2.params.MeteringRectangle
+
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.TotalCaptureResult
+
 
 
 class StereoCameraController(
@@ -77,11 +84,18 @@ class StereoCameraController(
         private const val RAW_MAX_IMAGES = 3
 
         // Restrict ultrawide AE/AF/AWB decisions to the central 70% of its FoV (trim 30% total).
-//        private const val ULTRA_3A_FRACTION = 0.70f
         // make it a default instead and overwrite based on lenses found
         private const val ULTRA_3A_FRACTION_DEFAULT = 0.70f
         // Computed per device from logical CONTROL_ZOOM_RATIO_RANGE if available; else default.
         private var ultra3aFraction: Float = ULTRA_3A_FRACTION_DEFAULT
+
+        // disable ALL logging (set false to disable)
+        private const val ENABLE_STEREO_RECORDING_LOG = true
+
+        // NEW: minimal logging (frameNumber and SENSOR_TIMESTAMP only)
+        // (no exposure, no muxer info, etc.)
+        private const val STEREO_LOG_FRAMES_ONLY = false
+
     }
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -160,6 +174,13 @@ class StereoCameraController(
     )
 
     @Volatile private var currentPhoto: PhotoCapture? = null
+
+    // for logging:
+    private var recordingLogger: StereoRecordingLogger? = null
+    private var recordingLogUri: Uri? = null
+    // Keep the recording capture callback so updateTorchOnRepeating() can reuse it while recording.
+    private var recordCaptureCallback: CameraCaptureSession.CaptureCallback? = null
+    // end logging vars
 
     fun start(
         surfaceTexture: SurfaceTexture,
@@ -347,10 +368,12 @@ class StereoCameraController(
                 wideVideoUri = MediaStoreUtils.createPendingVideo(context, wideName, nowMs)
                 ultraVideoUri = MediaStoreUtils.createPendingVideo(context, ultraName, nowMs)
 
-                val widePfd = context.contentResolver.openFileDescriptor(requireNotNull(wideVideoUri), "rw")
-                    ?: throw IllegalStateException("Failed to open wide video fd")
-                val ultraPfd = context.contentResolver.openFileDescriptor(requireNotNull(ultraVideoUri), "rw")
-                    ?: throw IllegalStateException("Failed to open ultra video fd")
+                val widePfd =
+                    context.contentResolver.openFileDescriptor(requireNotNull(wideVideoUri), "rw")
+                        ?: throw IllegalStateException("Failed to open wide video fd")
+                val ultraPfd =
+                    context.contentResolver.openFileDescriptor(requireNotNull(ultraVideoUri), "rw")
+                        ?: throw IllegalStateException("Failed to open ultra video fd")
 
                 val orient = computeOrientationHint()
 
@@ -373,7 +396,6 @@ class StereoCameraController(
                     width = recordSize.width,
                     height = recordSize.height,
                     fps = TARGET_FPS,
-//                    bitrateBps = VIDEO_BITRATE_BPS,
                     bitrateBps = videoBitrateBps,
                     iFrameIntervalSec = IFRAME_INTERVAL_SEC,
                     muxer = requireNotNull(wideMuxer)
@@ -384,11 +406,97 @@ class StereoCameraController(
                     width = recordSize.width,
                     height = recordSize.height,
                     fps = TARGET_FPS,
-//                    bitrateBps = VIDEO_BITRATE_BPS,
                     bitrateBps = videoBitrateBps,
                     iFrameIntervalSec = IFRAME_INTERVAL_SEC,
                     muxer = requireNotNull(ultraMuxer)
                 ).also { it.start() }
+
+                if (ENABLE_STEREO_RECORDING_LOG) {
+                    // for logging (create one JSON per recording)
+                    recordingLogUri = MediaStoreUtils.createPendingJson(
+                        context = context,
+                        displayName = "${timestampForFilename}_stereo.json",
+                        timestampMs = nowMs
+                    )
+                }
+
+                // Read logical camera metadata for timestamp source + sensor sync type
+                val logicalForLog = cameraManager.getCameraCharacteristics(LOGICAL_REAR_ID)
+
+                // Must pass non-null URIs to the logger
+                val wideUriForLog = requireNotNull(wideVideoUri)
+                val ultraUriForLog = requireNotNull(ultraVideoUri)
+
+                if (ENABLE_STEREO_RECORDING_LOG) {
+
+                    val tsSource = logicalForLog.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+                    val syncType =
+                        logicalForLog.get(CameraCharacteristics.LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE)
+                    // Build logger (keep it alive until stopRecording writes + finalizes the JSON)
+                    val logger = StereoRecordingLogger(
+                        recordingId = timestampForFilename,
+                        logicalCameraId = LOGICAL_REAR_ID,
+                        widePhysicalId = WIDE_PHYSICAL_ID,
+                        ultraPhysicalId = ULTRA_PHYSICAL_ID,
+                        recordSize = recordSize,
+                        targetFps = TARGET_FPS,
+                        videoBitrateBps = videoBitrateBps,
+                        eisEnabled = eisEnabled,
+                        orientationHintDegrees = orient,
+                        sensorTimestampSource = tsSource,
+                        sensorSyncType = syncType,
+                        wideVideoUri = wideUriForLog,
+                        ultraVideoUri = ultraUriForLog,
+                        framesOnly = STEREO_LOG_FRAMES_ONLY , // minimal logging
+                    )
+                    recordingLogger = logger
+
+                    // only run encoder callback hookups in full logging mode
+                    if (!STEREO_LOG_FRAMES_ONLY ) {
+
+                        // Attach encoder callbacks using NON-NULL local references
+                        val wEncLocal = requireNotNull(wideEncoder)
+                        val uEncLocal = requireNotNull(ultraEncoder)
+                        val aEncLocal = requireNotNull(audioEncoder)
+
+                        wEncLocal.onEncodedSample =
+                            { codecPtsUs, muxerPtsUs, sizeBytes, flags, writeNs ->
+                                logger.onWideVideoSample(
+                                    codecPtsUs,
+                                    muxerPtsUs,
+                                    sizeBytes,
+                                    flags,
+                                    writeNs
+                                )
+                            }
+                        uEncLocal.onEncodedSample =
+                            { codecPtsUs, muxerPtsUs, sizeBytes, flags, writeNs ->
+                                logger.onUltraVideoSample(
+                                    codecPtsUs,
+                                    muxerPtsUs,
+                                    sizeBytes,
+                                    flags,
+                                    writeNs
+                                )
+                            }
+                        aEncLocal.onEncodedSample =
+                            { codecPtsUs, muxerPtsUs, sizeBytes, flags, writeNs ->
+                                logger.onAudioSample(
+                                    codecPtsUs,
+                                    muxerPtsUs,
+                                    sizeBytes,
+                                    flags,
+                                    writeNs
+                                )
+                            }
+                    } else {
+                        // Make extra-sure sample logging stays off.
+                        wideEncoder?.onEncodedSample = null
+                        ultraEncoder?.onEncodedSample = null
+                        audioEncoder?.onEncodedSample = null
+                    }
+                    // end logging setup
+                }
 
                 createRecordingSession()
             } catch (e: Exception) {
@@ -400,6 +508,7 @@ class StereoCameraController(
     }
 
     fun stopRecording() {
+
         val handler = cameraHandler ?: run {
             callback.onError("Camera thread not running.")
             return
@@ -415,8 +524,10 @@ class StereoCameraController(
             try { session?.stopRepeating() } catch (_: Exception) {}
             try { session?.abortCaptures() } catch (_: Exception) {}
             try { session?.close() } catch (_: Exception) {}
+
             session = null
             repeatingBuilder = null
+            recordCaptureCallback = null
 
             val resolver = context.contentResolver
 
@@ -441,6 +552,12 @@ class StereoCameraController(
 
             isRecording = false
 
+            // stop logging and write/finalize
+            recordingLogger?.markStopped()
+
+            val logUriLocal = recordingLogUri
+            val loggerLocal = recordingLogger
+
             encodingExecutor.execute {
                 try { wEnc?.signalEndOfInputStream() } catch (_: Exception) {}
                 try { uEnc?.signalEndOfInputStream() } catch (_: Exception) {}
@@ -459,6 +576,20 @@ class StereoCameraController(
                 // Make files visible in MediaStore
                 if (wideUriLocal != null) MediaStoreUtils.finalizePending(resolver, wideUriLocal)
                 if (ultraUriLocal != null) MediaStoreUtils.finalizePending(resolver, ultraUriLocal)
+
+                // Write + finalize the stereo JSON log
+                if (loggerLocal != null && logUriLocal != null) {
+                    try {
+                        loggerLocal.writeToUri(context, logUriLocal)
+                        MediaStoreUtils.finalizePending(resolver, logUriLocal)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed writing/finalizing JSON log: ${e.message}", e)
+                        MediaStoreUtils.delete(resolver, logUriLocal)
+                    }
+                }
+                // Clear logger refs after we are fully done
+                recordingLogger = null
+                recordingLogUri = null
 
                 cameraHandler?.post {
                     if (cameraDevice != null && previewSurface != null) {
@@ -583,6 +714,7 @@ class StereoCameraController(
         try { session?.close() } catch (_: Exception) {}
         session = null
         repeatingBuilder = null
+        recordCaptureCallback = null
 
         closeReaders()
 
@@ -682,8 +814,72 @@ class StereoCameraController(
                             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
                             applyTorch(this)
                         }
+
+                        // NEW: for logging
                         repeatingBuilder = builder
-                        sess.setRepeatingRequest(builder.build(), null, handler)
+
+                        val captureCallback: CameraCaptureSession.CaptureCallback? =
+                            if (ENABLE_STEREO_RECORDING_LOG) {
+
+                                val wideEncSurface = wideEnc.inputSurface
+                                val ultraEncSurface = ultraEnc.inputSurface
+                                val previewSurfaceLocal = preview
+
+                                object : CameraCaptureSession.CaptureCallback() {
+
+                                    override fun onCaptureCompleted(
+                                        session: CameraCaptureSession,
+                                        request: CaptureRequest,
+                                        result: TotalCaptureResult
+                                    ) {
+                                        val logger = recordingLogger ?: return
+                                        val frameNo = result.frameNumber
+
+                                        val phys = result.physicalCameraResults
+                                        if (phys.isNotEmpty()) {
+                                            phys[WIDE_PHYSICAL_ID]?.let {
+                                                logger.onPhysicalCaptureResult(WIDE_PHYSICAL_ID, frameNo, it)
+                                            }
+                                            phys[ULTRA_PHYSICAL_ID]?.let {
+                                                logger.onPhysicalCaptureResult(ULTRA_PHYSICAL_ID, frameNo, it)
+                                            }
+                                        } else {
+                                            // Fallback: at least log the logical result under "wide"
+                                            logger.onPhysicalCaptureResult(WIDE_PHYSICAL_ID, frameNo, result)
+                                        }
+                                    }
+
+                                    override fun onCaptureBufferLost(
+                                        session: CameraCaptureSession,
+                                        request: CaptureRequest,
+                                        target: Surface,
+                                        frameNumber: Long
+                                    ) {
+                                        val logger = recordingLogger ?: return
+                                        when {
+                                            target === wideEncSurface ->
+                                                logger.onBufferLost(WIDE_PHYSICAL_ID, "wideEncoder", frameNumber)
+
+                                            target === ultraEncSurface ->
+                                                logger.onBufferLost(ULTRA_PHYSICAL_ID, "ultraEncoder", frameNumber)
+
+                                            target === previewSurfaceLocal ->
+                                                logger.onBufferLost(WIDE_PHYSICAL_ID, "preview", frameNumber)
+
+                                            else ->
+                                                logger.onBufferLost("unknown", "unknown", frameNumber)
+                                        }
+                                    }
+                                }
+                            } else {
+                                null
+                            }
+
+                        // Store it so torch toggles can keep using it while recording.
+                        recordCaptureCallback = captureCallback
+
+                        sess.setRepeatingRequest(builder.build(), captureCallback, handler)
+                        // end NEW for logging
 
                         // Start mic capture as close to the start of video frames as possible.
                         try {
@@ -999,7 +1195,9 @@ class StereoCameraController(
         val rb = repeatingBuilder ?: return
         applyTorch(rb)
         try {
-            sess.setRepeatingRequest(rb.build(), null, handler)
+            //sess.setRepeatingRequest(rb.build(), null, handler)
+            val cb = if (isRecording) recordCaptureCallback else null
+            sess.setRepeatingRequest(rb.build(), cb, handler)
         } catch (e: Exception) {
             Log.w(TAG, "updateTorchOnRepeating failed: ${e.message}")
         }
@@ -1070,8 +1268,7 @@ class StereoCameraController(
             builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
         }
 
-        //builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(TARGET_FPS, TARGET_FPS))
-        // potentially more robust, set for both logical AND physical
+        // set target fps for both logical AND physical just in case it enforces it more strongly
         val fpsRange = Range(TARGET_FPS, TARGET_FPS)
         builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
         // Also push the same FPS constraint to both physical cameras.
@@ -1175,8 +1372,10 @@ class StereoCameraController(
         try { session?.stopRepeating() } catch (_: Exception) {}
         try { session?.abortCaptures() } catch (_: Exception) {}
         try { session?.close() } catch (_: Exception) {}
+
         session = null
         repeatingBuilder = null
+        recordCaptureCallback = null
 
         val resolver = context.contentResolver
 
@@ -1217,5 +1416,27 @@ class StereoCameraController(
                 MediaStoreUtils.finalizePending(resolver, uUri)
             }
         }
+
+        // NEW logging stuff
+        val logUri = recordingLogUri
+        recordingLogUri = null
+
+        // If we created a log entry but failed, delete it so it doesn't remain pending.
+        if (logUri != null) {
+            if (deleteOnFailure) {
+                MediaStoreUtils.delete(resolver, logUri)
+            } else {
+                // Best-effort: write whatever we have and finalize
+                try {
+                    recordingLogger?.markStopped()
+                    recordingLogger?.writeToUri(context, logUri)
+                    MediaStoreUtils.finalizePending(resolver, logUri)
+                } catch (_: Exception) {
+                    MediaStoreUtils.delete(resolver, logUri)
+                }
+            }
+        }
+        recordingLogger = null
+        // end NEW logging stuff
     }
 }

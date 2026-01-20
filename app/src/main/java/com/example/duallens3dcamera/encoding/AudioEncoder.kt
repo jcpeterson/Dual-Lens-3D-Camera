@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.media.*
 import android.util.Log
 import java.nio.ByteBuffer
+import android.os.SystemClock
 
 /**
  * One microphone capture -> one AAC encoder -> write the SAME audio samples into BOTH muxers.
@@ -43,6 +44,19 @@ class AudioEncoder(
         get() = 2 * channelCount
 
     private var tempBuffer: ByteArray = ByteArray(4096)
+
+    /**
+     * For logging
+     * Called on the audio encoder thread for every encoded AAC sample we pass to the muxers.
+     * Note: we write the *same* AAC frames into both MP4s.
+     */
+    var onEncodedSample: ((
+        codecPtsUs: Long,
+        muxerPtsUs: Long,
+        sizeBytes: Int,
+        flags: Int,
+        writeDurationNs: Long
+    ) -> Unit)? = null
 
     /**
      * Starts the AAC encoder and prepares AudioRecord (but does NOT start recording yet).
@@ -263,12 +277,67 @@ class AudioEncoder(
                         bufferInfo.size = 0
                     }
 
+//                    if (bufferInfo.size > 0) {
+//                        val writeInfo = MediaCodec.BufferInfo().apply {
+//                            set(bufferInfo.offset, bufferInfo.size, bufferInfo.presentationTimeUs, bufferInfo.flags)
+//                        }
+//                        // Duplicate audio into both MP4s.
+//                        //muxers.forEach { it.writeAudioSample(outBuf, writeInfo) }
+//                        // NEW: logging version
+//                        val codecPtsUs = bufferInfo.presentationTimeUs
+//                        val t0 = SystemClock.elapsedRealtimeNanos()
+//                        for (muxer in muxers) {
+//                            muxer.writeAudioSample(outBuf, writeInfo)
+//                        }
+//                        val t1 = SystemClock.elapsedRealtimeNanos()
+//
+//                        onEncodedSample?.invoke(
+//                            codecPtsUs,
+//                            writeInfo.presentationTimeUs,
+//                            writeInfo.size,
+//                            writeInfo.flags,
+//                            (t1 - t0)
+//                        )
+//
+//                    }
                     if (bufferInfo.size > 0) {
+                        val codecPtsUs = bufferInfo.presentationTimeUs
+
                         val writeInfo = MediaCodec.BufferInfo().apply {
-                            set(bufferInfo.offset, bufferInfo.size, bufferInfo.presentationTimeUs, bufferInfo.flags)
+                            set(
+                                bufferInfo.offset,
+                                bufferInfo.size,
+                                bufferInfo.presentationTimeUs,
+                                bufferInfo.flags
+                            )
                         }
-                        // Duplicate audio into both MP4s.
-                        muxers.forEach { it.writeAudioSample(outBuf, writeInfo) }
+
+                        val cb = onEncodedSample
+                        if (cb != null) {
+                            val t0 = SystemClock.elapsedRealtimeNanos()
+//                            for (muxer in muxers) {
+//                                muxer.writeAudioSample(outBuf, writeInfo)
+//                            }
+                            for (muxer in muxers) {
+                                muxer.writeAudioSample(outBuf.duplicate(), writeInfo)
+                            }
+                            val t1 = SystemClock.elapsedRealtimeNanos()
+
+                            cb.invoke(
+                                codecPtsUs,
+                                writeInfo.presentationTimeUs,
+                                writeInfo.size,
+                                writeInfo.flags,
+                                (t1 - t0)
+                            )
+                        } else {
+//                            for (muxer in muxers) {
+//                                muxer.writeAudioSample(outBuf, writeInfo)
+//                            }
+                            for (muxer in muxers) {
+                                muxer.writeAudioSample(outBuf.duplicate(), writeInfo)
+                            }
+                        }
                     }
 
                     val eos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0

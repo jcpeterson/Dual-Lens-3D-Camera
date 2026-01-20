@@ -7,6 +7,7 @@ import android.media.MediaFormat
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
+import android.os.SystemClock
 
 class VideoEncoder(
     private val tag: String,
@@ -32,6 +33,21 @@ class VideoEncoder(
     private var _inputSurface: Surface? = null
     val inputSurface: Surface
         get() = requireNotNull(_inputSurface) { "Encoder not started" }
+
+    /**
+     * For logging
+     * Called on the encoder thread for every encoded video sample that we pass to the muxer.
+     *
+     * codecPtsUs = MediaCodec.BufferInfo.presentationTimeUs from the encoder output.
+     * muxerPtsUs = the PTS we wrote to MediaMuxer (in this app we normalize to start at 0 per file).
+     */
+    var onEncodedSample: ((
+        codecPtsUs: Long,
+        muxerPtsUs: Long,
+        sizeBytes: Int,
+        flags: Int,
+        writeDurationNs: Long
+    ) -> Unit)? = null
 
     fun start() {
         val format = MediaFormat.createVideoFormat(MIME_AVC, width, height).apply {
@@ -131,14 +147,34 @@ class VideoEncoder(
                     }
 
                     if (bufferInfo.size > 0) {
-                        if (firstPtsUs < 0) firstPtsUs = bufferInfo.presentationTimeUs
-                        val ptsUs = bufferInfo.presentationTimeUs - firstPtsUs
+                        // Absolute codec PTS as produced by MediaCodec (derived from input surface timestamps).
+                        val codecPtsUs = bufferInfo.presentationTimeUs
+
+                        // Normalize so each MP4 starts at t=0.
+                        if (firstPtsUs < 0) firstPtsUs = codecPtsUs
+                        val muxerPtsUs = codecPtsUs - firstPtsUs
 
                         val writeInfo = MediaCodec.BufferInfo().apply {
-                            set(bufferInfo.offset, bufferInfo.size, ptsUs, bufferInfo.flags)
+                            set(bufferInfo.offset, bufferInfo.size, muxerPtsUs, bufferInfo.flags)
                         }
 
-                        muxer.writeVideoSample(encodedData, writeInfo)
+                        // If logging is disabled, avoid timing + callback overhead.
+                        val cb = onEncodedSample
+                        if (cb != null) {
+                            val t0 = SystemClock.elapsedRealtimeNanos()
+                            muxer.writeVideoSample(encodedData, writeInfo)
+                            val t1 = SystemClock.elapsedRealtimeNanos()
+
+                            cb.invoke(
+                                /* codecPtsUs */ codecPtsUs,
+                                /* muxerPtsUs */ writeInfo.presentationTimeUs,
+                                /* sizeBytes  */ writeInfo.size,
+                                /* flags      */ writeInfo.flags,
+                                /* writeNs    */ (t1 - t0)
+                            )
+                        } else {
+                            muxer.writeVideoSample(encodedData, writeInfo)
+                        }
                     }
 
                     val eos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0

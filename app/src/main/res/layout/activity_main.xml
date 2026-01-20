@@ -32,7 +32,8 @@
             android:textAllCaps="false"
             android:text="1440"
             android:textColor="@android:color/white"
-            app:backgroundTint="@android:color/black"/>
+            app:backgroundTint="@android:color/black"
+            app:cornerRadius="0dp"/>
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnBitrate"
@@ -48,7 +49,8 @@
             android:textAllCaps="false"
             android:text="50"
             android:textColor="@android:color/white"
-            app:backgroundTint="@android:color/black"/>
+            app:backgroundTint="@android:color/black"
+            app:cornerRadius="0dp"/>
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnEis"
@@ -64,7 +66,8 @@
             android:textAllCaps="false"
             android:text="EIS"
             android:textColor="@android:color/white"
-            app:backgroundTint="@android:color/black"/>
+            app:backgroundTint="@android:color/black"
+            app:cornerRadius="0dp"/>
 
         <!-- Keep id btnFormat for the photo format toggle -->
         <com.google.android.material.button.MaterialButton
@@ -81,7 +84,8 @@
             android:textAllCaps="false"
             android:text="JPG"
             android:textColor="@android:color/white"
-            app:backgroundTint="@android:color/black"/>
+            app:backgroundTint="@android:color/black"
+            app:cornerRadius="0dp"/>
     </LinearLayout>
 
     <!-- Preview (TextureView must NOT have android:background) -->
@@ -117,7 +121,8 @@
             android:insetLeft="0dp"
             android:insetRight="0dp"
             android:insetTop="0dp"
-            android:insetBottom="0dp"/>
+            android:insetBottom="0dp"
+            app:cornerRadius="0dp"/>
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -137,7 +142,8 @@
                 android:insetLeft="0dp"
                 android:insetRight="0dp"
                 android:insetTop="0dp"
-                android:insetBottom="0dp"/>
+                android:insetBottom="0dp"
+                app:cornerRadius="0dp"/>
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnRecord"
@@ -151,7 +157,8 @@
                 android:insetLeft="0dp"
                 android:insetRight="0dp"
                 android:insetTop="0dp"
-                android:insetBottom="0dp"/>
+                android:insetBottom="0dp"
+                app:cornerRadius="0dp"/>
         </LinearLayout>
 
     </LinearLayout>
