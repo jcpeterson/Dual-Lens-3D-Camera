@@ -119,6 +119,10 @@ class StereoCameraController(
     private var wideChars: CameraCharacteristics? = null
     private var ultraChars: CameraCharacteristics? = null
 
+    // NEW: pixel 4 support attempt
+    private var widePhysicalId: String = WIDE_PHYSICAL_ID
+    private var ultraPhysicalId: String = ULTRA_PHYSICAL_ID
+
     private var wideMap: StreamConfigurationMap? = null
     private var ultraMap: StreamConfigurationMap? = null
 
@@ -436,8 +440,13 @@ class StereoCameraController(
                     val logger = StereoRecordingLogger(
                         recordingId = timestampForFilename,
                         logicalCameraId = LOGICAL_REAR_ID,
-                        widePhysicalId = WIDE_PHYSICAL_ID,
-                        ultraPhysicalId = ULTRA_PHYSICAL_ID,
+
+//                        widePhysicalId = WIDE_PHYSICAL_ID,
+//                        ultraPhysicalId = ULTRA_PHYSICAL_ID,
+                        // pixel 4 edit
+                        widePhysicalId = widePhysicalId,
+                        ultraPhysicalId = ultraPhysicalId,
+
                         recordSize = recordSize,
                         targetFps = TARGET_FPS,
                         videoBitrateBps = videoBitrateBps,
@@ -620,8 +629,11 @@ class StereoCameraController(
 
     private fun selectCharacteristicsAndSizes() {
         logicalChars = cameraManager.getCameraCharacteristics(LOGICAL_REAR_ID)
-        wideChars = cameraManager.getCameraCharacteristics(WIDE_PHYSICAL_ID)
-        ultraChars = cameraManager.getCameraCharacteristics(ULTRA_PHYSICAL_ID)
+//        wideChars = cameraManager.getCameraCharacteristics(WIDE_PHYSICAL_ID)
+//        ultraChars = cameraManager.getCameraCharacteristics(ULTRA_PHYSICAL_ID)
+        // pixel 4 edit
+        wideChars = cameraManager.getCameraCharacteristics(widePhysicalId)
+        ultraChars = cameraManager.getCameraCharacteristics(ultraPhysicalId)
 
         val logical = requireNotNull(logicalChars)
 
@@ -640,8 +652,9 @@ class StereoCameraController(
         Log.i(TAG, "Ultrawide 3A fraction = $ultra3aFraction (logical zoomRange=$zoomRange)")
 
 
-        val wide = requireNotNull(wideChars)
-        val ultra = requireNotNull(ultraChars)
+        // pixel 4 edit
+//        val wide = requireNotNull(wideChars)
+//        val ultra = requireNotNull(ultraChars)
 
         val caps = logical.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet() ?: emptySet()
         if (!caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)) {
@@ -651,9 +664,28 @@ class StereoCameraController(
 
         val physicalIds = logical.physicalCameraIds
         if (!physicalIds.contains(WIDE_PHYSICAL_ID) || !physicalIds.contains(ULTRA_PHYSICAL_ID)) {
-            callback.onError("Expected physical IDs 2 and 3 not found under logical 0. Found: $physicalIds")
-            return
+//            callback.onError("Expected physical IDs 2 and 3 not found under logical 0. Found: $physicalIds")
+//            return
+            // pixel 4 edit
+            if (physicalIds.contains("3") && physicalIds.contains("4")) {
+//                widePhysicalId = "3"
+//                ultraPhysicalId = "4"
+                // on the pixel 4, the wide is wider than the 2x, so swap order
+                // the wide becomes the "ultrawide" and the 2x becomes the "wide"
+                widePhysicalId = "4"
+                ultraPhysicalId = "3"
+                wideChars = cameraManager.getCameraCharacteristics(widePhysicalId)
+                ultraChars = cameraManager.getCameraCharacteristics(ultraPhysicalId)
+                Log.i(TAG, "Falling back to physical IDs 3/4 for wide/ultra on logical 0.")
+            } else {
+                callback.onError("Expected physical IDs 2 and 3 not found under logical 0. Found: $physicalIds")
+                return
+            }
         }
+
+        // pixel 4 edit
+        val wide = requireNotNull(wideChars)
+        val ultra = requireNotNull(ultraChars)
 
         sensorOrientation = wide.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
 
@@ -743,9 +775,13 @@ class StereoCameraController(
         }
 
         val outputs = ArrayList<OutputConfiguration>(3).apply {
-            add(OutputConfiguration(preview).apply { setPhysicalCameraId(WIDE_PHYSICAL_ID) })
-            add(OutputConfiguration(requireNotNull(wideReader).surface).apply { setPhysicalCameraId(WIDE_PHYSICAL_ID) })
-            add(OutputConfiguration(requireNotNull(ultraReader).surface).apply { setPhysicalCameraId(ULTRA_PHYSICAL_ID) })
+//            add(OutputConfiguration(preview).apply { setPhysicalCameraId(WIDE_PHYSICAL_ID) })
+//            add(OutputConfiguration(requireNotNull(wideReader).surface).apply { setPhysicalCameraId(WIDE_PHYSICAL_ID) })
+//            add(OutputConfiguration(requireNotNull(ultraReader).surface).apply { setPhysicalCameraId(ULTRA_PHYSICAL_ID) })
+            // pixel 4 edit
+            add(OutputConfiguration(preview).apply { setPhysicalCameraId(widePhysicalId) })
+            add(OutputConfiguration(requireNotNull(wideReader).surface).apply { setPhysicalCameraId(widePhysicalId) })
+            add(OutputConfiguration(requireNotNull(ultraReader).surface).apply { setPhysicalCameraId(ultraPhysicalId) })
         }
 
         camera.createCaptureSessionByOutputConfigurations(
@@ -792,9 +828,13 @@ class StereoCameraController(
         repeatingBuilder = null
 
         val outputs = ArrayList<OutputConfiguration>(3).apply {
-            add(OutputConfiguration(preview).apply { setPhysicalCameraId(WIDE_PHYSICAL_ID) })
-            add(OutputConfiguration(wideEnc.inputSurface).apply { setPhysicalCameraId(WIDE_PHYSICAL_ID) })
-            add(OutputConfiguration(ultraEnc.inputSurface).apply { setPhysicalCameraId(ULTRA_PHYSICAL_ID) })
+//            add(OutputConfiguration(preview).apply { setPhysicalCameraId(WIDE_PHYSICAL_ID) })
+//            add(OutputConfiguration(wideEnc.inputSurface).apply { setPhysicalCameraId(WIDE_PHYSICAL_ID) })
+//            add(OutputConfiguration(ultraEnc.inputSurface).apply { setPhysicalCameraId(ULTRA_PHYSICAL_ID) })
+            // pixel 4 edit
+            add(OutputConfiguration(preview).apply { setPhysicalCameraId(widePhysicalId) })
+            add(OutputConfiguration(wideEnc.inputSurface).apply { setPhysicalCameraId(widePhysicalId) })
+            add(OutputConfiguration(ultraEnc.inputSurface).apply { setPhysicalCameraId(ultraPhysicalId) })
         }
 
         camera.createCaptureSessionByOutputConfigurations(
@@ -837,15 +877,15 @@ class StereoCameraController(
 
                                         val phys = result.physicalCameraResults
                                         if (phys.isNotEmpty()) {
-                                            phys[WIDE_PHYSICAL_ID]?.let {
-                                                logger.onPhysicalCaptureResult(WIDE_PHYSICAL_ID, frameNo, it)
+                                            phys[widePhysicalId]?.let {
+                                                logger.onPhysicalCaptureResult(widePhysicalId, frameNo, it)
                                             }
-                                            phys[ULTRA_PHYSICAL_ID]?.let {
-                                                logger.onPhysicalCaptureResult(ULTRA_PHYSICAL_ID, frameNo, it)
+                                            phys[ultraPhysicalId]?.let {
+                                                logger.onPhysicalCaptureResult(ultraPhysicalId, frameNo, it)
                                             }
                                         } else {
                                             // Fallback: at least log the logical result under "wide"
-                                            logger.onPhysicalCaptureResult(WIDE_PHYSICAL_ID, frameNo, result)
+                                            logger.onPhysicalCaptureResult(widePhysicalId, frameNo, result)
                                         }
                                     }
 
@@ -858,13 +898,13 @@ class StereoCameraController(
                                         val logger = recordingLogger ?: return
                                         when {
                                             target === wideEncSurface ->
-                                                logger.onBufferLost(WIDE_PHYSICAL_ID, "wideEncoder", frameNumber)
+                                                logger.onBufferLost(widePhysicalId, "wideEncoder", frameNumber)
 
                                             target === ultraEncSurface ->
-                                                logger.onBufferLost(ULTRA_PHYSICAL_ID, "ultraEncoder", frameNumber)
+                                                logger.onBufferLost(ultraPhysicalId, "ultraEncoder", frameNumber)
 
                                             target === previewSurfaceLocal ->
-                                                logger.onBufferLost(WIDE_PHYSICAL_ID, "preview", frameNumber)
+                                                logger.onBufferLost(widePhysicalId, "preview", frameNumber)
 
                                             else ->
                                                 logger.onBufferLost("unknown", "unknown", frameNumber)
@@ -1245,13 +1285,13 @@ class StereoCameraController(
         // set the AF/AE/AWB regions if supported
         // (number of regions > 0 since we want to use 1 region)
         if (maxAf > 0) {
-            setPhysical(builder, ULTRA_PHYSICAL_ID, CaptureRequest.CONTROL_AF_REGIONS, regions)
+            setPhysical(builder, ultraPhysicalId, CaptureRequest.CONTROL_AF_REGIONS, regions)
         }
         if (maxAe > 0) {
-            setPhysical(builder, ULTRA_PHYSICAL_ID, CaptureRequest.CONTROL_AE_REGIONS, regions)
+            setPhysical(builder, ultraPhysicalId, CaptureRequest.CONTROL_AE_REGIONS, regions)
         }
         if (maxAwb > 0) {
-            setPhysical(builder, ULTRA_PHYSICAL_ID, CaptureRequest.CONTROL_AWB_REGIONS, regions)
+            setPhysical(builder, ultraPhysicalId, CaptureRequest.CONTROL_AWB_REGIONS, regions)
         }
     }
 
@@ -1272,8 +1312,8 @@ class StereoCameraController(
         val fpsRange = Range(TARGET_FPS, TARGET_FPS)
         builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
         // Also push the same FPS constraint to both physical cameras.
-        setPhysical(builder, WIDE_PHYSICAL_ID, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
-        setPhysical(builder, ULTRA_PHYSICAL_ID, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+        setPhysical(builder, widePhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+        setPhysical(builder, ultraPhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
 
         if (Build.VERSION.SDK_INT >= 30) {
             try {
@@ -1317,15 +1357,15 @@ class StereoCameraController(
 
         // Per-physical
         if (wideActive != null) {
-            setPhysical(builder, WIDE_PHYSICAL_ID, CaptureRequest.SCALER_CROP_REGION, wideActive)
+            setPhysical(builder, widePhysicalId, CaptureRequest.SCALER_CROP_REGION, wideActive)
         }
         if (ultraActive != null) {
-            setPhysical(builder, ULTRA_PHYSICAL_ID, CaptureRequest.SCALER_CROP_REGION, ultraActive)
+            setPhysical(builder, ultraPhysicalId, CaptureRequest.SCALER_CROP_REGION, ultraActive)
         }
 
         // Force OIS off per physical
-        setPhysical(builder, WIDE_PHYSICAL_ID, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
-        setPhysical(builder, ULTRA_PHYSICAL_ID, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+        setPhysical(builder, widePhysicalId, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+        setPhysical(builder, ultraPhysicalId, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
     }
 
     // ---------------------------------------------------------------------------------------------
