@@ -42,6 +42,8 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
     private var eisEnabled: Boolean = false // default OFF
     private var rawMode: Boolean = false // default JPG
     private var torchOn: Boolean = false // not persisted (you didn't ask)
+    private var zoom2xEnabled: Boolean = false // default 1x
+
 
     // ---- UI state flags ----
     private var isRecording: Boolean = false
@@ -79,6 +81,7 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
 
         loadPrefs()
         updateTopBarUi()
+        updateZoomButton()
         updateTorchButton()
         updateUi()
 
@@ -129,6 +132,15 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
             val ts = timestampForFilename()
             controller.captureStereoPhoto(ts, rawMode)
             requestPreviewTransformReapply() // make sure preview still has the right aspect
+        }
+
+        binding.btnZoom.setOnClickListener {
+            if (isRecording || isBusy) return@setOnClickListener
+            zoom2xEnabled = !zoom2xEnabled
+            savePrefs()
+            updateZoomButton()
+            controller.setZoom2x(zoom2xEnabled)
+            requestPreviewTransformReapply() // keep preview aspect sane
         }
 
         binding.btnRecord.setOnClickListener {
@@ -208,7 +220,8 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
             initialTorchOn = torchOn,
             initialRequestedRecordSize = currentRequestedRecordSize(),
             initialVideoBitrateBps = currentVideoBitrateBps(),
-            initialEisEnabled = eisEnabled
+            initialEisEnabled = eisEnabled,
+            initialZoom2x = zoom2xEnabled
         )
 
         binding.textureView.post {
@@ -233,6 +246,7 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         bitrateIndex = prefs.getInt("bitrateIndex", 0).coerceIn(0, bitrateOptionsMbps.size - 1)
         eisEnabled = prefs.getBoolean("eisEnabled", false)
         rawMode = prefs.getBoolean("rawMode", false)
+        zoom2xEnabled = prefs.getBoolean("zoom2xEnabled", false)
     }
 
     private fun savePrefs() {
@@ -241,10 +255,15 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
             .putInt("bitrateIndex", bitrateIndex)
             .putBoolean("eisEnabled", eisEnabled)
             .putBoolean("rawMode", rawMode)
+            .putBoolean("zoom2xEnabled", zoom2xEnabled)
             .apply()
     }
 
     // ---------------- top bar UI ----------------
+
+    private fun updateZoomButton() {
+        binding.btnZoom.text = if (zoom2xEnabled) "2x" else "1x"
+    }
 
     private fun updateTopBarUi() {
         updateVideoResButton()
@@ -329,6 +348,7 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         setEnabledStyle(binding.btnBitrate, topEnabled, android.R.color.black, android.R.color.white)
         setEnabledStyle(binding.btnEis, topEnabled, android.R.color.black, android.R.color.white)
         setEnabledStyle(binding.btnFormat, topEnabled, android.R.color.black, android.R.color.white)
+        setEnabledStyle(binding.btnZoom, topEnabled, android.R.color.black, android.R.color.white)
 
         // Re-apply EIS strike state after enable/disable styling.
         updateEisButton()

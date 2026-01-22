@@ -47,6 +47,11 @@ object StereoSbs {
     // report alignments params or not
     private const val DEBUG_AFFINE_LOGS = true
 
+    // prevents the 1x affine from being reused right after a zoom-mode flip
+    fun resetLastGoodAffine() {
+        lastGoodAffine6 = null
+    }
+
     private fun logAffine(label: String, affine: Mat) {
         if (!DEBUG_AFFINE_LOGS) return
         val m = DoubleArray(6)
@@ -228,6 +233,45 @@ object StereoSbs {
     }
 
     /**
+     * Emulate a 2x zoomed ultrawide for alignment WITHOUT changing camera capture:
+     *  - center-crop to [cropFraction] of width/height (0.5 => 2x)
+     *  - resize back to the original dimensions
+     *
+     * This keeps output dimensions identical (important for the existing expectedScale gates),
+     * but narrows FoV like a real 2x zoom.
+     */
+    private fun centerCropThenResizeBackBgr(srcBgr: Mat, cropFraction: Float = 0.50f): Mat {
+        val f = cropFraction.coerceIn(0.05f, 1.0f)
+        if (f >= 0.999f) return srcBgr
+
+        val outW = srcBgr.cols()
+        val outH = srcBgr.rows()
+
+        val cropW = max(1, (outW * f).toInt())
+        val cropH = max(1, (outH * f).toInt())
+        val x0 = ((outW - cropW) / 2).coerceAtLeast(0)
+        val y0 = ((outH - cropH) / 2).coerceAtLeast(0)
+
+        val roi = Rect(x0, y0, cropW, cropH)
+
+        val cropped = srcBgr.submat(roi).clone()
+        srcBgr.release()
+
+        val resized = Mat()
+        Imgproc.resize(
+            cropped,
+            resized,
+            CvSize(outW.toDouble(), outH.toDouble()),
+            0.0,
+            0.0,
+            Imgproc.INTER_LINEAR
+        )
+        cropped.release()
+        return resized
+    }
+
+
+    /**
      * Creates an SBS JPEG:
      *   LEFT  = aligned/cropped ultrawide
      *   RIGHT = wide (not warped/scaled/cropped)
@@ -243,6 +287,8 @@ object StereoSbs {
     fun alignAndCreateSbsJpegBytes(
         wideRightJpeg: ByteArray,
         ultraLeftJpeg: ByteArray,
+        zoom2xEnabled: Boolean = false,
+        // 80% is important because on pixel 7, the UW is ~.7x and we need some margin
         ultraInnerFractionForFeatures: Float = 0.80f,
         fallbackUltraOverlapFraction: Float = 0.70f,
         maxOutputDim: Int = 6144,
@@ -294,6 +340,13 @@ object StereoSbs {
             // Apply EXIF orientation in pixel space so SBS is upright without relying on EXIF rotation.
             wideBgr = applyExifOrientationBgr(requireNotNull(wideBgr), wideExifOri)
             ultraBgr = applyExifOrientationBgr(requireNotNull(ultraBgr), ultraExifOri)
+
+            // If 2x mode is enabled, emulate a 2x ultrawide by center-cropping and resizing back
+            // (keeps dimensions the same, but narrows FoV).
+            if (zoom2xEnabled) {
+                Log.i(TAG, "2x mode: pre-cropping ultrawide to 50% and resizing back before alignment")
+                ultraBgr = centerCropThenResizeBackBgr(requireNotNull(ultraBgr), cropFraction = 0.50f)
+            }
 
             // BGR -> Gray for features
             wideGray = Mat()
@@ -396,7 +449,7 @@ object StereoSbs {
             )
             // since we only need the affine until warpAffine() runs,
             // we can just release right after warping
-            runCatching { affineOut.release() }
+            runCatching { affineOutToRelease.release() }
 
             // Compose SBS: LEFT = aligned ultrawide, RIGHT = wide (unchanged geometry)
 //            val wideW = wideBgr.cols()

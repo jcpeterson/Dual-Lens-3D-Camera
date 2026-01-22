@@ -63,8 +63,12 @@ class StereoCameraController(
 
         // Pixel-based guidance (hardcoded)
         private const val LOGICAL_REAR_ID = "0"
-        private const val WIDE_PHYSICAL_ID = "2"
+        private const val WIDE_1X_PHYSICAL_ID = "2"
+        // Google exposes the 2x remosaiced crop of the main wide lens as another physical camera.
+        // On Pixels this is commonly physical ID "4" under logical "0".
+        private const val WIDE_2X_PHYSICAL_ID = "4"
         private const val ULTRA_PHYSICAL_ID = "3"
+
 
         private val PREFERRED_RECORD_SIZE = Size(1440, 1080)
         private const val TARGET_FPS = 30
@@ -120,9 +124,15 @@ class StereoCameraController(
     private var wideChars: CameraCharacteristics? = null
     private var ultraChars: CameraCharacteristics? = null
 
-    // NEW: pixel 4 support attempt
-    private var widePhysicalId: String = WIDE_PHYSICAL_ID
-    private var ultraPhysicalId: String = ULTRA_PHYSICAL_ID
+    // Active physical IDs for the current zoom mode.
+    // 1x: wide=2, ultrawide=3
+    // 2x: wide=4 (remosaic crop), ultrawide=3
+    private var widePhysicalId: String = WIDE_1X_PHYSICAL_ID
+    private val ultraPhysicalId: String = ULTRA_PHYSICAL_ID
+
+    @Volatile private var zoom2xEnabled: Boolean = false
+    private var hasWide2xPhysical: Boolean = false
+
 
     private var wideMap: StreamConfigurationMap? = null
     private var ultraMap: StreamConfigurationMap? = null
@@ -195,7 +205,8 @@ class StereoCameraController(
         initialTorchOn: Boolean,
         initialRequestedRecordSize: Size,
         initialVideoBitrateBps: Int,
-        initialEisEnabled: Boolean
+        initialEisEnabled: Boolean,
+        initialZoom2x: Boolean
     ): PreviewConfig {
         this.surfaceTexture = surfaceTexture
         this.displayRotation = displayRotation
@@ -206,6 +217,9 @@ class StereoCameraController(
         this.requestedRecordSize = initialRequestedRecordSize
         this.videoBitrateBps = initialVideoBitrateBps
         this.eisEnabled = initialEisEnabled
+
+        this.zoom2xEnabled = initialZoom2x
+        this.widePhysicalId = if (initialZoom2x) WIDE_2X_PHYSICAL_ID else WIDE_1X_PHYSICAL_ID
 
         startThreads()
         selectCharacteristicsAndSizes()
@@ -296,6 +310,98 @@ class StereoCameraController(
             createPreviewSession()
         }
     }
+
+    /**
+     * Toggle between:
+     *  - 1x: wide physical ID "2" + ultrawide physical ID "3"
+     *  - 2x: wide physical ID "4" (remosaic crop of wide) + ultrawide ID "3" with a 50% centered crop.
+     */
+    fun setZoom2x(enabled: Boolean) {
+        val handler = cameraHandler ?: run {
+            callback.onError("Camera thread not running.")
+            return
+        }
+
+        handler.post {
+            if (isRecording) {
+                callback.onStatus("Can't change zoom while recording.")
+                return@post
+            }
+
+            if (zoom2xEnabled == enabled) return@post
+
+            val logical = logicalChars
+            if (logical == null) {
+                callback.onError("Camera not ready.")
+                return@post
+            }
+
+            // Validate 2x availability on this device.
+            val physicalIds = logical.physicalCameraIds
+            if (enabled && !physicalIds.contains(WIDE_2X_PHYSICAL_ID)) {
+                zoom2xEnabled = false
+                widePhysicalId = WIDE_1X_PHYSICAL_ID
+                callback.onStatus("2x mode not available (no physical ID $WIDE_2X_PHYSICAL_ID under logical $LOGICAL_REAR_ID).")
+                return@post
+            }
+
+            zoom2xEnabled = enabled
+            widePhysicalId = if (enabled) WIDE_2X_PHYSICAL_ID else WIDE_1X_PHYSICAL_ID
+
+            // prevents the 1x affine from being reused right after a zoom-mode flip
+            StereoSbs.resetLastGoodAffine()
+
+            // Refresh characteristics/maps for the new wide physical camera.
+            try {
+                wideChars = cameraManager.getCameraCharacteristics(widePhysicalId)
+                // Ultrawide stays fixed, but keep this non-null.
+                if (ultraChars == null) {
+                    ultraChars = cameraManager.getCameraCharacteristics(ultraPhysicalId)
+                }
+            } catch (e: Exception) {
+                callback.onError("Failed switching zoom: ${e.message}")
+                zoom2xEnabled = false
+                widePhysicalId = WIDE_1X_PHYSICAL_ID
+                wideChars = cameraManager.getCameraCharacteristics(widePhysicalId)
+            }
+
+            val wide = wideChars
+            val ultra = ultraChars
+            if (wide == null || ultra == null) {
+                callback.onError("Camera characteristics missing after zoom switch.")
+                return@post
+            }
+
+            sensorOrientation = wide.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: sensorOrientation
+
+            wideMap = wide.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ultraMap = ultra.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+
+            val wMap = wideMap
+            val uMap = ultraMap
+            if (wMap != null && uMap != null) {
+                recomputeRecordSizeLocked()
+                jpegWideSize = SizeSelector.chooseLargestJpegFourByThree(wMap)
+                jpegUltraSize = SizeSelector.chooseLargestJpegFourByThree(uMap)
+                rawWideSize = SizeSelector.chooseLargestRaw(wMap)
+                rawUltraSize = SizeSelector.chooseLargestRaw(uMap)
+            }
+
+            if (cameraDevice != null && previewSurface != null) {
+                createPreviewSession()
+            }
+        }
+    }
+
+//    private fun getUltrawideCropRect(active: Rect): Rect {
+//        // In 2x mode we crop ultrawide to the centered inner 50% (2x) to keep the
+//        // relative FoV ratio between the two streams similar to 1x mode.
+//        return if (zoom2xEnabled) {
+//            centeredRect(active, ULTRA_2X_CROP_FRACTION)
+//        } else {
+//            Rect(active)
+//        }
+//    }
 
     fun captureStereoPhoto(timestampForFilename: String, raw: Boolean) {
         val handler = cameraHandler ?: run {
@@ -672,26 +778,48 @@ class StereoCameraController(
             return
         }
 
+//        val physicalIds = logical.physicalCameraIds
+//        if (!physicalIds.contains(WIDE_PHYSICAL_ID) || !physicalIds.contains(ULTRA_PHYSICAL_ID)) {
+////            callback.onError("Expected physical IDs 2 and 3 not found under logical 0. Found: $physicalIds")
+////            return
+//            // pixel 4 edit
+//            if (physicalIds.contains("3") && physicalIds.contains("4")) {
+////                widePhysicalId = "3"
+////                ultraPhysicalId = "4"
+//                // on the pixel 4, the wide is wider than the 2x, so swap order
+//                // the wide becomes the "ultrawide" and the 2x becomes the "wide"
+//                widePhysicalId = "4"
+//                ultraPhysicalId = "3"
+//                wideChars = cameraManager.getCameraCharacteristics(widePhysicalId)
+//                ultraChars = cameraManager.getCameraCharacteristics(ultraPhysicalId)
+//                Log.i(TAG, "Falling back to physical IDs 3/4 for wide/ultra on logical 0.")
+//            } else {
+//                callback.onError("Expected physical IDs 2 and 3 not found under logical 0. Found: $physicalIds")
+//                return
+//            }
+//        }
         val physicalIds = logical.physicalCameraIds
-        if (!physicalIds.contains(WIDE_PHYSICAL_ID) || !physicalIds.contains(ULTRA_PHYSICAL_ID)) {
-//            callback.onError("Expected physical IDs 2 and 3 not found under logical 0. Found: $physicalIds")
-//            return
-            // pixel 4 edit
-            if (physicalIds.contains("3") && physicalIds.contains("4")) {
-//                widePhysicalId = "3"
-//                ultraPhysicalId = "4"
-                // on the pixel 4, the wide is wider than the 2x, so swap order
-                // the wide becomes the "ultrawide" and the 2x becomes the "wide"
-                widePhysicalId = "4"
-                ultraPhysicalId = "3"
-                wideChars = cameraManager.getCameraCharacteristics(widePhysicalId)
-                ultraChars = cameraManager.getCameraCharacteristics(ultraPhysicalId)
-                Log.i(TAG, "Falling back to physical IDs 3/4 for wide/ultra on logical 0.")
-            } else {
-                callback.onError("Expected physical IDs 2 and 3 not found under logical 0. Found: $physicalIds")
-                return
-            }
+        if (!physicalIds.contains(WIDE_1X_PHYSICAL_ID) || !physicalIds.contains(ULTRA_PHYSICAL_ID)) {
+            callback.onError(
+                "Expected physical IDs $WIDE_1X_PHYSICAL_ID (wide) and $ULTRA_PHYSICAL_ID (ultrawide) not found under logical $LOGICAL_REAR_ID. Found: $physicalIds"
+            )
+            return
         }
+
+        hasWide2xPhysical = physicalIds.contains(WIDE_2X_PHYSICAL_ID)
+        if (zoom2xEnabled && !hasWide2xPhysical) {
+            zoom2xEnabled = false
+            callback.onStatus("2x mode not available on this device; falling back to 1x.")
+        }
+
+        // Pick active wide physical camera for current zoom mode.
+        widePhysicalId = if (zoom2xEnabled) WIDE_2X_PHYSICAL_ID else WIDE_1X_PHYSICAL_ID
+
+        wideChars = cameraManager.getCameraCharacteristics(widePhysicalId)
+        ultraChars = cameraManager.getCameraCharacteristics(ultraPhysicalId)
+
+
+
 
         // pixel 4 edit
         val wide = requireNotNull(wideChars)
@@ -801,6 +929,7 @@ class StereoCameraController(
                     session = sess
                     try {
                         val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+//                        val builder = createRequest(camera, CameraDevice.TEMPLATE_PREVIEW).apply {
                             addTarget(preview)
                             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
@@ -811,6 +940,7 @@ class StereoCameraController(
                         sess.setRepeatingRequest(builder.build(), null, handler)
                     } catch (e: Exception) {
                         callback.onError("Preview repeating request failed: ${e.message}")
+                        Log.e(TAG, "Preview repeating request failed: ${e.message}", e)
                     }
                 }
 
@@ -854,6 +984,7 @@ class StereoCameraController(
                     session = sess
                     try {
                         val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+//                        val builder = createRequest(camera, CameraDevice.TEMPLATE_RECORD).apply {
                             addTarget(preview)
                             addTarget(wideEnc.inputSurface)
                             addTarget(ultraEnc.inputSurface)
@@ -982,6 +1113,7 @@ class StereoCameraController(
             try { sess.stopRepeating() } catch (_: Exception) {}
 
             val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+//            val builder = createRequest(camera, CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(wideR.surface)
                 addTarget(ultraR.surface)
 
@@ -1119,10 +1251,18 @@ class StereoCameraController(
                     if (sbsUri != null) {
                         sbsExecutor.execute {
                             try {
+//                                val sbsBytes = StereoSbs.alignAndCreateSbsJpegBytes(
+//                                    wideRightJpeg = wideBytes,     // RIGHT side of SBS
+//                                    ultraLeftJpeg = ultraBytes,    // LEFT side of SBS
+//                                    // Derived from logical zoom-out capability; only used if ORB/RANSAC fails.
+//                                    fallbackUltraOverlapFraction = ultra3aFraction
+//                                )
+                                val zoom2xForThisSbs = zoom2xEnabled  // snapshot current mode for this capture
+
                                 val sbsBytes = StereoSbs.alignAndCreateSbsJpegBytes(
-                                    wideRightJpeg = wideBytes,     // RIGHT side of SBS
-                                    ultraLeftJpeg = ultraBytes,    // LEFT side of SBS
-                                    // Derived from logical zoom-out capability; only used if ORB/RANSAC fails.
+                                    wideRightJpeg = wideBytes,
+                                    ultraLeftJpeg = ultraBytes,
+                                    zoom2xEnabled = zoom2xForThisSbs,
                                     fallbackUltraOverlapFraction = ultra3aFraction
                                 )
 
@@ -1328,8 +1468,15 @@ class StereoCameraController(
         if (maxAf <= 0 && maxAe <= 0 && maxAwb <= 0) return
 
         val active = ultra.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
-//        val rect = centeredRect(active, ULTRA_3A_FRACTION)
+
         val rect = centeredRect(active, ultra3aFraction)
+
+        // In 2x mode, the aligner will software-crop the ultrawide to the centered inner 50%.
+        // Keep ultrawide 3A (AE/AF/AWB metering) inside that same effective region.
+        if (zoom2xEnabled) {
+            rect.intersect(centeredRect(active, 0.50f))
+        }
+
         val region = MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX)
         val regions = arrayOf(region)
 
@@ -1350,36 +1497,30 @@ class StereoCameraController(
 
         // EIS toggle (video only)
         if (isVideo && eisEnabled) {
-            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
-            // Might as well do OIS if EIS is on even though Pixel 7 ultrawide in particular can't do it.
-            // Not sure OIS off requests are allowed anyway. Likely not.
-            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+            builder.set(
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            )
+            builder.set(
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+            )
         } else {
-            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
-            builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+            builder.set(
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+            )
+            builder.set(
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
+            )
         }
 
-        // set target fps for both logical AND physical just in case it enforces it more strongly
+        // Target FPS (logical + per-physical best effort)
         val fpsRange = Range(TARGET_FPS, TARGET_FPS)
         builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
-        // Also push the same FPS constraint to both physical cameras.
         setPhysical(builder, widePhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
         setPhysical(builder, ultraPhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
-
-        if (Build.VERSION.SDK_INT >= 30) {
-            try {
-                builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, 1.0f)
-            } catch (_: Exception) {}
-        }
-
-        // If EIS is enabled, don't force full crop region (EIS needs to crop).
-        if (!(isVideo && eisEnabled)) {
-            setFullCrop(builder)
-        }
-
-        try {
-            builder.set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
-        } catch (_: Exception) {}
 
         builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
 
@@ -1393,30 +1534,6 @@ class StereoCameraController(
             builder.setPhysicalCameraKey(key, value, physicalId)
         } catch (_: Exception) {
         }
-    }
-
-    private fun setFullCrop(builder: CaptureRequest.Builder) {
-        val wide = wideChars ?: return
-        val ultra = ultraChars ?: return
-        val wideActive: Rect? = wide.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
-        val ultraActive: Rect? = ultra.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
-
-        // Logical (best-effort)
-        if (wideActive != null) {
-            try { builder.set(CaptureRequest.SCALER_CROP_REGION, wideActive) } catch (_: Exception) {}
-        }
-
-        // Per-physical
-        if (wideActive != null) {
-            setPhysical(builder, widePhysicalId, CaptureRequest.SCALER_CROP_REGION, wideActive)
-        }
-        if (ultraActive != null) {
-            setPhysical(builder, ultraPhysicalId, CaptureRequest.SCALER_CROP_REGION, ultraActive)
-        }
-
-        // Force OIS off per physical
-        setPhysical(builder, widePhysicalId, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
-        setPhysical(builder, ultraPhysicalId, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
     }
 
     // ---------------------------------------------------------------------------------------------

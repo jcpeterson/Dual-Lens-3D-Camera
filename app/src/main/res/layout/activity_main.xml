@@ -98,6 +98,32 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"/>
 
+    <!-- 1x/2x zoom toggle (overlayed on preview) -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnZoom"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="12dp"
+        android:alpha="0.85"
+        android:insetLeft="0dp"
+        android:insetRight="0dp"
+        android:insetTop="0dp"
+        android:insetBottom="0dp"
+        android:minWidth="0dp"
+        android:minHeight="0dp"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:text="1x"
+        android:textAllCaps="false"
+        android:textColor="@android:color/white"
+        app:backgroundTint="@android:color/black"
+        app:cornerRadius="16dp"
+        app:layout_constraintBottom_toBottomOf="@id/textureView"
+        app:layout_constraintEnd_toEndOf="@id/textureView"/>
+
     <!-- Bottom controls -->
     <LinearLayout
         android:id="@+id/buttonPanel"
