@@ -63,9 +63,10 @@ class StereoCameraController(
         // Pixel-based guidance (hardcoded)
         private const val LOGICAL_REAR_ID = "0"
         private const val WIDE_1X_PHYSICAL_ID = "2"
-        // Google exposes the 2x remosaiced crop of the main wide lens as another physical camera.
-        // On Pixels this is commonly physical ID "4" under logical "0".
+        // Google exposes the 2x crop of the main wide lens as another physical camera.
+        // Non‑Pro Pixels: usually "4". Pro Pixels: usually "5".
         private const val WIDE_2X_PHYSICAL_ID = "4"
+        private const val WIDE_2X_PHYSICAL_ID_PRO = "5"
         private const val ULTRA_PHYSICAL_ID = "3"
 
 
@@ -335,15 +336,19 @@ class StereoCameraController(
 
             // Validate 2x availability on this device.
             val physicalIds = logical.physicalCameraIds
-            if (enabled && !physicalIds.contains(WIDE_2X_PHYSICAL_ID)) {
+            val wide2xId = resolveWide2xPhysicalId(physicalIds)
+
+            if (enabled && wide2xId == null) {
                 zoom2xEnabled = false
                 widePhysicalId = WIDE_1X_PHYSICAL_ID
-                callback.onStatus("2x mode not available (no physical ID $WIDE_2X_PHYSICAL_ID under logical $LOGICAL_REAR_ID).")
+                callback.onStatus(
+                    "2x mode not available (no physical ID $WIDE_2X_PHYSICAL_ID or $WIDE_2X_PHYSICAL_ID_PRO under logical $LOGICAL_REAR_ID)."
+                )
                 return@post
             }
 
             zoom2xEnabled = enabled
-            widePhysicalId = if (enabled) WIDE_2X_PHYSICAL_ID else WIDE_1X_PHYSICAL_ID
+            widePhysicalId = if (enabled) wide2xId!! else WIDE_1X_PHYSICAL_ID
 
             // prevents the 1x affine from being reused right after a zoom-mode flip
             StereoSbs.resetLastGoodAffine()
@@ -763,14 +768,16 @@ class StereoCameraController(
             return
         }
 
-        hasWide2xPhysical = physicalIds.contains(WIDE_2X_PHYSICAL_ID)
-        if (zoom2xEnabled && !hasWide2xPhysical) {
+        val wide2xId = resolveWide2xPhysicalId(physicalIds)
+        hasWide2xPhysical = wide2xId != null
+
+        if (zoom2xEnabled && wide2xId == null) {
             zoom2xEnabled = false
             callback.onStatus("2x mode not available on this device; falling back to 1x.")
         }
 
         // Pick active wide physical camera for current zoom mode.
-        widePhysicalId = if (zoom2xEnabled) WIDE_2X_PHYSICAL_ID else WIDE_1X_PHYSICAL_ID
+        widePhysicalId = if (zoom2xEnabled) wide2xId!! else WIDE_1X_PHYSICAL_ID
 
         wideChars = cameraManager.getCameraCharacteristics(widePhysicalId)
         ultraChars = cameraManager.getCameraCharacteristics(ultraPhysicalId)
@@ -1477,6 +1484,15 @@ class StereoCameraController(
     // ---------------------------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------------------------
+
+    private fun resolveWide2xPhysicalId(physicalIds: Set<String>): String? {
+        // Prefer Pro mapping first (because Pro devices also *contain* "4", but it's tele there).
+        return when {
+            physicalIds.contains(WIDE_2X_PHYSICAL_ID_PRO) -> WIDE_2X_PHYSICAL_ID_PRO
+            physicalIds.contains(WIDE_2X_PHYSICAL_ID) -> WIDE_2X_PHYSICAL_ID
+            else -> null
+        }
+    }
 
     private fun closeReaders() {
         try { wideReader?.close() } catch (_: Exception) {}
