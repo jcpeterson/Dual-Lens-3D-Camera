@@ -122,11 +122,18 @@ class StereoCameraController(
     private var wideChars: CameraCharacteristics? = null
     private var ultraChars: CameraCharacteristics? = null
 
-    // Active physical IDs for the current zoom mode.
-    // 1x: wide=2, ultrawide=3
-    // 2x: wide=4 (remosaic crop), ultrawide=3
+    // Resolved per-device lens rig (Pixel/Samsung etc) from LensDiscovery.
+    private var logicalRearId: String = LOGICAL_REAR_ID
+    private var wide1xPhysicalId: String = WIDE_1X_PHYSICAL_ID
+    private var wide2xPhysicalId: String? = null
+    private var ultraPhysicalId: String = ULTRA_PHYSICAL_ID
+
+    // Pixel: wide is the RIGHT-eye image. Non-Pixel (Samsung assumption): wide is LEFT-eye image.
+    private var wideIsRightEye: Boolean = true
+
+    // Active wide physical ID for the current zoom mode.
     private var widePhysicalId: String = WIDE_1X_PHYSICAL_ID
-    private val ultraPhysicalId: String = ULTRA_PHYSICAL_ID
+
 
     @Volatile private var zoom2xEnabled: Boolean = false
     private var hasWide2xPhysical: Boolean = false
@@ -217,7 +224,8 @@ class StereoCameraController(
         this.eisEnabled = initialEisEnabled
 
         this.zoom2xEnabled = initialZoom2x
-        this.widePhysicalId = if (initialZoom2x) WIDE_2X_PHYSICAL_ID else WIDE_1X_PHYSICAL_ID
+        // We'll pick the correct wide physical ID in selectCharacteristicsAndSizes() after LensDiscovery runs.
+        this.widePhysicalId = WIDE_1X_PHYSICAL_ID
 
         startThreads()
         selectCharacteristicsAndSizes()
@@ -336,19 +344,18 @@ class StereoCameraController(
 
             // Validate 2x availability on this device.
             val physicalIds = logical.physicalCameraIds
-            val wide2xId = resolveWide2xPhysicalId(physicalIds)
+            // Prefer the discovered wide2x ID (works for Samsung too); fall back to Pixel ID heuristic.
+            val wide2xId = wide2xPhysicalId ?: resolveWide2xPhysicalId(physicalIds)
 
             if (enabled && wide2xId == null) {
                 zoom2xEnabled = false
-                widePhysicalId = WIDE_1X_PHYSICAL_ID
-                callback.onStatus(
-                    "2x mode not available (no physical ID $WIDE_2X_PHYSICAL_ID or $WIDE_2X_PHYSICAL_ID_PRO under logical $LOGICAL_REAR_ID)."
-                )
+                widePhysicalId = wide1xPhysicalId
+                callback.onStatus("2x mode not available (no wide 2x physical camera under logical $logicalRearId).")
                 return@post
             }
 
             zoom2xEnabled = enabled
-            widePhysicalId = if (enabled) wide2xId!! else WIDE_1X_PHYSICAL_ID
+            widePhysicalId = if (enabled) wide2xId!! else wide1xPhysicalId
 
             // prevents the 1x affine from being reused right after a zoom-mode flip
             StereoSbs.resetLastGoodAffine()
@@ -363,7 +370,7 @@ class StereoCameraController(
             } catch (e: Exception) {
                 callback.onError("Failed switching zoom: ${e.message}")
                 zoom2xEnabled = false
-                widePhysicalId = WIDE_1X_PHYSICAL_ID
+                widePhysicalId = wide1xPhysicalId
                 wideChars = cameraManager.getCameraCharacteristics(widePhysicalId)
             }
 
@@ -533,7 +540,7 @@ class StereoCameraController(
                 }
 
                 // Read logical camera metadata for timestamp source + sensor sync type
-                val logicalForLog = cameraManager.getCameraCharacteristics(LOGICAL_REAR_ID)
+                val logicalForLog = cameraManager.getCameraCharacteristics(logicalRearId)
 
                 // Must pass non-null URIs to the logger
                 val wideUriForLog = requireNotNull(wideVideoUri)
@@ -547,7 +554,7 @@ class StereoCameraController(
                     // Build logger (keep it alive until stopRecording writes + finalizes the JSON)
                     val logger = StereoRecordingLogger(
                         recordingId = timestampForFilename,
-                        logicalCameraId = LOGICAL_REAR_ID,
+                        logicalCameraId = logicalRearId,
                         widePhysicalId = widePhysicalId,
                         ultraPhysicalId = ultraPhysicalId,
                         recordSize = recordSize,
@@ -731,12 +738,31 @@ class StereoCameraController(
     }
 
     private fun selectCharacteristicsAndSizes() {
-        logicalChars = cameraManager.getCameraCharacteristics(LOGICAL_REAR_ID)
-//        wideChars = cameraManager.getCameraCharacteristics(WIDE_PHYSICAL_ID)
-//        ultraChars = cameraManager.getCameraCharacteristics(ULTRA_PHYSICAL_ID)
-        // pixel 4 edit
-        wideChars = cameraManager.getCameraCharacteristics(widePhysicalId)
-        ultraChars = cameraManager.getCameraCharacteristics(ultraPhysicalId)
+
+        // Discover the rear logical camera + physical IDs (Pixel + Samsung).
+        val rig = LensDiscovery.discoverStereoRig(cameraManager)
+
+        if (rig != null) {
+            logicalRearId = rig.logicalRearId
+            wide1xPhysicalId = rig.wide1xId
+            ultraPhysicalId = rig.ultraId
+            wide2xPhysicalId = rig.wide2xId
+            wideIsRightEye = rig.wideIsRightEye
+
+            // Override rotation behavior using the simple heuristic:
+            // Pixel => portrait (ROTATION_0), Samsung => landscape (ROTATION_90)
+            displayRotation = rig.assumedDisplayRotation
+        } else {
+            // Fallback to the prior Pixel hardcodes if discovery fails.
+            logicalRearId = LOGICAL_REAR_ID
+            wide1xPhysicalId = WIDE_1X_PHYSICAL_ID
+            ultraPhysicalId = ULTRA_PHYSICAL_ID
+            wide2xPhysicalId = null
+            wideIsRightEye = true
+            displayRotation = Surface.ROTATION_0
+        }
+
+        logicalChars = cameraManager.getCameraCharacteristics(logicalRearId)
 
         val logical = requireNotNull(logicalChars)
 
@@ -756,19 +782,21 @@ class StereoCameraController(
 
         val caps = logical.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toSet() ?: emptySet()
         if (!caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)) {
-            callback.onError("Rear camera is not LOGICAL_MULTI_CAMERA. This app targets Pixel 7 (logical 0).")
+            callback.onError("Rear camera is not LOGICAL_MULTI_CAMERA. This app requires a logical multi-camera (wide+ultrawide).")
             return
         }
 
         val physicalIds = logical.physicalCameraIds
-        if (!physicalIds.contains(WIDE_1X_PHYSICAL_ID) || !physicalIds.contains(ULTRA_PHYSICAL_ID)) {
+        if (!physicalIds.contains(wide1xPhysicalId) || !physicalIds.contains(ultraPhysicalId)) {
             callback.onError(
-                "Expected physical IDs $WIDE_1X_PHYSICAL_ID (wide) and $ULTRA_PHYSICAL_ID (ultrawide) not found under logical $LOGICAL_REAR_ID. Found: $physicalIds"
+                "Expected physical IDs $wide1xPhysicalId (wide) and $ultraPhysicalId (ultrawide) not found under logical $logicalRearId. Found: $physicalIds"
             )
             return
         }
 
-        val wide2xId = resolveWide2xPhysicalId(physicalIds)
+        // Decide which physical ID (if any) represents wide 2x crop.
+        val wide2xId = wide2xPhysicalId ?: resolveWide2xPhysicalId(physicalIds)
+        wide2xPhysicalId = wide2xId // cache it for setZoom2x()
         hasWide2xPhysical = wide2xId != null
 
         if (zoom2xEnabled && wide2xId == null) {
@@ -777,7 +805,7 @@ class StereoCameraController(
         }
 
         // Pick active wide physical camera for current zoom mode.
-        widePhysicalId = if (zoom2xEnabled) wide2xId!! else WIDE_1X_PHYSICAL_ID
+        widePhysicalId = if (zoom2xEnabled && wide2xId != null) wide2xId else wide1xPhysicalId
 
         wideChars = cameraManager.getCameraCharacteristics(widePhysicalId)
         ultraChars = cameraManager.getCameraCharacteristics(ultraPhysicalId)
@@ -807,7 +835,7 @@ class StereoCameraController(
     private fun openCamera() {
         val handler = requireNotNull(cameraHandler)
         try {
-            cameraManager.openCamera(LOGICAL_REAR_ID, object : CameraDevice.StateCallback() {
+            cameraManager.openCamera(logicalRearId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     cameraDevice = camera
                     createPreviewSession()
@@ -1207,6 +1235,7 @@ class StereoCameraController(
                                 val sbsBytes = StereoSbs.alignAndCreateSbsJpegBytes(
                                     wideRightJpeg = wideBytes,
                                     ultraLeftJpeg = ultraBytes,
+                                    wideIsRightEye = wideIsRightEye,
                                     zoom2xEnabled = zoom2xForThisSbs,
                                     fallbackUltraOverlapFraction = ultra3aFraction
                                 )

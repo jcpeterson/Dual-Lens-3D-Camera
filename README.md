@@ -1,29 +1,30 @@
 # Dual Lens 3D Camera
 
-An android app (Pixel 7+ phones only currently) for taking stereo photos and video using the wide 
-and ultrawide lenses.
+An android app (Pixel 7+ and some Samsung S-series) for taking stereo photos and video using
+the wide and ultrawide lenses.
 
-It's currently tested and working on Pixel 7, Pixel 7a, Pixel 7 Pro, Pixel 8 Pro, and Pixel 9a.
-It's likely but not yet guaranteed to work on any device Pixel 6 and up, since all of these devices
-have wide and ultrawide rear cameras.
+It's currently tested and working on Pixel 7, Pixel 7a, Pixel 7 Pro, Pixel 8, and Pixel 9a.
+It's likely but not yet guaranteed to work on any device Pixel 5 and up, since all of these devices
+have wide and ultrawide rear cameras. Samsung S models are "supported" but untested.
 
 ### Where to find the APK
 
-Check the latest release [here](/releases).
+Check the latest release [here](../../releases).
 
 ### How to use it
-- Hold the phone in portrait orientation only.
+- Pixels: hold the phone in **portrait**.
+- Samsung: hold the phone in **landscape**.
 - Press the PHOTO or RECORD buttons to take photos or video.
+- Use ZOOM to toggle 1x / 2x (2x uses wide sensor crop when a device supports/exposes it).
 - Outputs are stored in `Pictures/StereoCapture`.
 
 ### How does it work?
 
 Modern Pixel phones arrange their wide and ultrawide lenses horizontally adjacent in the portrait 
 orientation. In other words, holding the phone in portrait orientation and taking photos with both
-lenses creates stereo pairs (assuming the ultrawide image is cropped correctly afterwards). 
-
-Because modern Pixels expose their wide and ultrawide lenses are physical IDs under the same logical
-camera via the Camera2 API, well-synced images (and videos) across both lenses can be obtained.
+lenses creates stereo pairs (assuming the ultrawide image is cropped correctly afterwards). The same
+goes for most Samsung phones except that their lenses are horizontally adjacent in the landscape
+orientation.
 
 ### Known issues
 
@@ -35,7 +36,7 @@ way to improve it. For most video without too much fast action, this should be f
 
 This app uses the Android **Camera2** API to capture from the rear **logical** camera and route output
 buffers to the **wide** and **ultrawide** physical cameras simultaneously (current IDs
-assume logical `"0"`, wide `"2"`, ultrawide `"3"`).
+are discovered at runtime via `LensDiscovery.kt`).
 
 High-level flow:
 - **MainActivity** owns the UI (preview, PHOTO/RECORD buttons, RAW toggle, torch, bitrate/size/EIS
@@ -80,6 +81,7 @@ Optional per-recording JSON logging:
 
 Output files:
 - Photos/videos are saved to `Pictures/StereoCapture` with timestamped filenames:
-    - `*_wide.*`, `*_ultrawide.*`, and optional `*_stereo.json`.
-- The app is designed for **portrait orientation only** (Pixel wide/ultrawide are horizontally
-  separated in portrait, enabling stereo pairs after ultrawide cropping/alignment offline).
+  - `*_wide.*`, `*_ultrawide.*`, `*_sbs.jpg` (JPEG mode), and optional `*_stereo.json`.
+- SBS left/right ordering:
+  - Pixels: **LEFT = ultrawide**, **RIGHT = wide**.
+  - Samsung (assumed): **LEFT = wide**, **RIGHT = ultrawide**.
