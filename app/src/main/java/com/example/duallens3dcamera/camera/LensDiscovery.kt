@@ -29,8 +29,8 @@ object LensDiscovery {
         val wide1xId: String,
         val ultraId: String,
         val wide2xId: String?,
-        /** Pixel => wide on RIGHT, ultra on LEFT. Samsung => wide on LEFT, ultra on RIGHT. */
-        val wideIsRightEye: Boolean,
+        /** Pixel or (assumed) Samsung */
+        val phoneIsAPixel: Boolean,
         /** Pixel => portrait. Samsung => landscape. */
         val assumedDisplayRotation: Int
     )
@@ -91,7 +91,7 @@ object LensDiscovery {
             wide1xId = wideFull.id,
             ultraId = ultra.id,
             wide2xId = wide2x?.id,
-            wideIsRightEye = isPixel,
+            phoneIsAPixel = isPixel,
             assumedDisplayRotation = if (isPixel) Surface.ROTATION_0 else Surface.ROTATION_90
         )
     }

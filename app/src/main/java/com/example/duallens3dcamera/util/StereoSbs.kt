@@ -278,10 +278,6 @@ object StereoSbs {
      *   LEFT  = aligned/cropped ultrawide
      *   RIGHT = wide (not warped/scaled/cropped)
      *
-     * If [wideIsRightEye] is false (Samsung-style physical placement), we flip the output:
-     *   LEFT  = wide
-     *   RIGHT = aligned/cropped ultrawide
-     *
      * @param wideRightJpeg wide JPEG bytes (the *wide* lens image)
      * @param ultraLeftJpeg ultrawide JPEG bytes (the *ultrawide* lens image)
      * @param ultraInnerFractionForFeatures 0.80 => detect features only in inner 80% of ultrawide
@@ -293,7 +289,6 @@ object StereoSbs {
     fun alignAndCreateSbsJpegBytes(
         wideRightJpeg: ByteArray,
         ultraLeftJpeg: ByteArray,
-        wideIsRightEye: Boolean = true,
         zoom2xEnabled: Boolean = false,
         // 80% is important because on pixel 7, the UW is ~.7x and we need some margin
         ultraInnerFractionForFeatures: Float = 0.80f,
@@ -458,19 +453,13 @@ object StereoSbs {
             // we can just release right after warping
             runCatching { affineOutToRelease.release() }
 
-            // Compose SBS. Default (Pixel): LEFT = aligned ultrawide, RIGHT = wide.
-            // Samsung-style: flip so LEFT = wide, RIGHT = aligned ultrawide.
+            // Compose SBS: Assume LEFT = aligned ultrawide, RIGHT = wide.
             sbs = Mat(wideH, wideW * 2, wideBgr.type())
 
             val leftRoi = sbs.submat(Rect(0, 0, wideW, wideH))
             val rightRoi = sbs.submat(Rect(wideW, 0, wideW, wideH))
-            if (wideIsRightEye) {
-                alignedUltra.copyTo(leftRoi)
-                wideBgr.copyTo(rightRoi)
-            } else {
-                wideBgr.copyTo(leftRoi)
-                alignedUltra.copyTo(rightRoi)
-            }
+            alignedUltra.copyTo(leftRoi)
+            wideBgr.copyTo(rightRoi)
             leftRoi.release()
             rightRoi.release()
 
