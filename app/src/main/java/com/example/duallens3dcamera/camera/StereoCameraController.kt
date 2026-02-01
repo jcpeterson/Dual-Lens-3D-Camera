@@ -1379,6 +1379,7 @@ class StereoCameraController(
 
                     // START: new DNG improvements
                     // Use per-physical TotalCaptureResult for correct color matrices, shading maps, etc.
+                    // This ensures each DNG has good colors and reduces WB mismatches between L-R
                     val physicalTotals: Map<String, TotalCaptureResult> = try {
                         total.physicalCameraTotalResults
                     } catch (_: Throwable) {
@@ -1387,8 +1388,22 @@ class StereoCameraController(
                     val wideTotal = physicalTotals[widePhysicalId] ?: total
                     val ultraTotal = physicalTotals[ultraPhysicalId] ?: total
 
-                    saveDng(wideUri, wideCharacteristics, wideTotal, wideImage, exifDt)
-                    saveDng(ultraUri, ultraCharacteristics, ultraTotal, ultraImage, exifDt)
+//                    saveDng(wideUri, wideCharacteristics, wideTotal, wideImage, exifDt)
+//                    saveDng(ultraUri, ultraCharacteristics, ultraTotal, ultraImage, exifDt)
+
+                    // Write wide DNG, then close wide Image immediately.
+                    try {
+                        saveDng(wideUri, wideCharacteristics, wideTotal, wideImage)
+                    } finally {
+                        try { wideImage.close() } catch (_: Exception) {}
+                    }
+
+                    // Write ultra DNG, then close ultra Image immediately.
+                    try {
+                        saveDng(ultraUri, ultraCharacteristics, ultraTotal, ultraImage)
+                    } finally {
+                        try { ultraImage.close() } catch (_: Exception) {}
+                    }
                     // END: new DNG improvements
 
 //                    saveDng(wideUri, wideCharacteristics, total, wideImage, exifDt)
@@ -1397,15 +1412,24 @@ class StereoCameraController(
                     MediaStoreUtils.finalizePending(resolver, wideUri)
                     MediaStoreUtils.finalizePending(resolver, ultraUri)
                 } catch (e: Exception) {
+//                    Log.e(TAG, "DNG save failed: ${e.message}", e)
+//                    MediaStoreUtils.delete(resolver, wideUri)
+//                    MediaStoreUtils.delete(resolver, ultraUri)
+//                    callback.onError("DNG save failed: ${e.message}")
                     Log.e(TAG, "DNG save failed: ${e.message}", e)
+                    // Ensure images aren't leaked if an exception happens before the finally blocks above.
+                    try { wideImage.close() } catch (_: Exception) {}
+                    try { ultraImage.close() } catch (_: Exception) {}
+
                     MediaStoreUtils.delete(resolver, wideUri)
                     MediaStoreUtils.delete(resolver, ultraUri)
                     callback.onError("DNG save failed: ${e.message}")
-                } finally {
-                    // Close RAW Images only after DngCreator has consumed them.
-                    try { wideImage.close() } catch (_: Exception) {}
-                    try { ultraImage.close() } catch (_: Exception) {}
                 }
+//                } finally {
+//                    // Close RAW Images only after DngCreator has consumed them.
+//                    try { wideImage.close() } catch (_: Exception) {}
+//                    try { ultraImage.close() } catch (_: Exception) {}
+//                }
             }
         }
     }
@@ -1425,21 +1449,46 @@ class StereoCameraController(
         setExifDateTimeOriginal(uri, exifDateTimeOriginal, orientation)
     }
 
+//    private fun saveDng(
+//        uri: Uri,
+//        characteristics: CameraCharacteristics,
+//        result: TotalCaptureResult,
+//        image: Image,
+//        exifDateTimeOriginal: String
+//    ) {
+//        val dngCreator = android.hardware.camera2.DngCreator(characteristics, result)
+//
+//        // Match the same "upright" logic as JPEG/video, but convert degrees -> EXIF orientation constant.
+//        val orientationConst = exifOrientationFromDegrees(computeJpegOrientation())
+//        try {
+//            dngCreator.setOrientation(orientationConst)
+//        } catch (_: Exception) {
+//            // If it fails for any reason, we'll still try to set TAG_ORIENTATION via ExifInterface below.
+//        }
+//
+//        context.contentResolver.openOutputStream(uri)?.use { os ->
+//            dngCreator.writeImage(os, image)
+//            os.flush()
+//        } ?: throw IllegalStateException("openOutputStream failed for $uri")
+//
+//        // Set DateTimeOriginal (and enforce orientation tag as well for DNG viewers)
+//        setExifDateTimeOriginal(uri, exifDateTimeOriginal, orientationConst)
+//    }
     private fun saveDng(
         uri: Uri,
         characteristics: CameraCharacteristics,
         result: TotalCaptureResult,
-        image: Image,
-        exifDateTimeOriginal: String
+        image: Image
     ) {
         val dngCreator = android.hardware.camera2.DngCreator(characteristics, result)
 
-        // Match the same "upright" logic as JPEG/video, but convert degrees -> EXIF orientation constant.
+        // Keep orientation via DngCreator (no ExifInterface post-write: avoids full DNG rewrite).
         val orientationConst = exifOrientationFromDegrees(computeJpegOrientation())
         try {
             dngCreator.setOrientation(orientationConst)
-        } catch (_: Exception) {
-            // If it fails for any reason, we'll still try to set TAG_ORIENTATION via ExifInterface below.
+        } catch (e: Exception) {
+            // Extremely unlikely with a valid orientationConst; log and continue.
+            Log.w(TAG, "DngCreator.setOrientation failed: ${e.message}")
         }
 
         context.contentResolver.openOutputStream(uri)?.use { os ->
@@ -1447,8 +1496,8 @@ class StereoCameraController(
             os.flush()
         } ?: throw IllegalStateException("openOutputStream failed for $uri")
 
-        // Set DateTimeOriginal (and enforce orientation tag as well for DNG viewers)
-        setExifDateTimeOriginal(uri, exifDateTimeOriginal, orientationConst)
+        // Intentionally no ExifInterface edits for DNG:
+        // ExifInterface can rewrite the whole file (big + slow), and provides no benefit we can't live without.
     }
 
     private fun setExifDateTimeOriginal(uri: Uri, exifDateTimeOriginal: String, orientation: Int? = null) {
