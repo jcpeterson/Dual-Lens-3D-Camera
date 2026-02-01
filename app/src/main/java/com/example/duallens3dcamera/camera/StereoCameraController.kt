@@ -127,7 +127,7 @@ class StereoCameraController(
     private var wide2xPhysicalId: String? = null
     private var ultraPhysicalId: String = ULTRA_PHYSICAL_ID
 
-    // Is the phone a Pixel or not (assumed Samsung if not)
+    // Is the phone a Pixel or not (assumed Samsung if not, for now)
     private var phoneIsAPixel: Boolean = true
 
     // Active wide physical ID for the current zoom mode.
@@ -307,28 +307,19 @@ class StereoCameraController(
         handler.post { updateTorchOnRepeating() }
     }
 
-//    fun setPhotoOutputRaw(raw: Boolean) {
-//        isRawMode = raw
-//        val handler = cameraHandler ?: return
-//        handler.post {
-//            if (isRecording) return@post
-//            if (cameraDevice == null || previewSurface == null) return@post
-//            createPreviewSession()
-//        }
-//    }
-    // samsung hack version
     fun setPhotoOutputRaw(raw: Boolean) {
         val handler = cameraHandler ?: return
         handler.post {
+            // don't change photo settings while recording video
             if (isRecording) return@post
-
+            // RAW currently fails on Samsung so
+            // don't allow it on them for now (force jpg instead)
             if (!phoneIsAPixel && raw) {
-                // Samsung: force JPG only.
                 if (isRawMode) isRawMode = false
                 callback.onStatus("RAW/DNG is Pixel-only for now (Samsung uses JPG only).")
                 return@post
             }
-
+            // otherwise, toggle RAW mode
             isRawMode = raw
             if (cameraDevice == null || previewSurface == null) return@post
             createPreviewSession()
@@ -438,51 +429,11 @@ class StereoCameraController(
                 return@post
             }
 
-            // before samsung hack
-//            if (raw != isRawMode) {
-//                isRawMode = raw
-//                createPreviewSession()
-//            }
-//
-//            val nowMs = System.currentTimeMillis()
-//            val exifDt = exifDateTimeOriginal(nowMs)
-//
-//            try {
-//                val wideName = if (raw) "${timestampForFilename}_wide.dng" else "${timestampForFilename}_wide.jpg"
-//                val ultraName = if (raw) "${timestampForFilename}_ultrawide.dng" else "${timestampForFilename}_ultrawide.jpg"
-//                val wideMime = if (raw) "image/x-adobe-dng" else "image/jpeg"
-//                val ultraMime = if (raw) "image/x-adobe-dng" else "image/jpeg"
-//
-//                val wideUri = MediaStoreUtils.createPendingImage(context, wideName, wideMime, nowMs)
-//                val ultraUri = MediaStoreUtils.createPendingImage(context, ultraName, ultraMime, nowMs)
-//
-//                val sbsUri = if (!raw) {
-//                    val sbsName = "${timestampForFilename}_sbs.jpg"
-//                    MediaStoreUtils.createPendingImage(context, sbsName, "image/jpeg", nowMs)
-//                } else {
-//                    null
-//                }
-//
-//                currentPhoto = PhotoCapture(
-//                    isRaw = raw,
-//                    wideUri = wideUri,
-//                    ultraUri = ultraUri,
-//                    sbsUri = sbsUri,
-//                    exifDateTimeOriginal = exifDt
-//                )
-//
-//                doStillCapture(raw)
-//            } catch (e: Exception) {
-//                callback.onError("Photo capture setup failed: ${e.message}")
-//                callback.onPhotoCaptureDone()
-//            }
-
-            // samsung hack version
+            // don't allow RAW on Samsung
             val effectiveRaw = raw && phoneIsAPixel
             if (raw && !phoneIsAPixel) {
                 callback.onStatus("RAW/DNG is Pixel-only for now (Samsung uses JPG).")
             }
-
             if (effectiveRaw != isRawMode) {
                 isRawMode = effectiveRaw
                 createPreviewSession()
@@ -967,29 +918,7 @@ class StereoCameraController(
             Triple(ImageFormat.JPEG, jpegWideSize, jpegUltraSize)
         }
 
-        // before Samsung hack
-//        val maxImages = if (format == ImageFormat.RAW_SENSOR) RAW_MAX_IMAGES else JPEG_MAX_IMAGES
-
-        val maxImages = if (format == ImageFormat.RAW_SENSOR) {
-            RAW_MAX_IMAGES
-        } else {
-            // Samsung tends to be happier with small maxImages on multi-stream stills.
-            if (!phoneIsAPixel) 2 else JPEG_MAX_IMAGES
-        }
-
-        // before Samsung hack
-//        wideReader = ImageReader.newInstance(wideSize.width, wideSize.height, format, maxImages).apply {
-//            setOnImageAvailableListener({ reader -> onStillImageAvailable(isWide = true, reader = reader) }, handler)
-//        }
-//        ultraReader = ImageReader.newInstance(ultraSize.width, ultraSize.height, format, maxImages).apply {
-//            setOnImageAvailableListener({ reader -> onStillImageAvailable(isWide = false, reader = reader) }, handler)
-//        }
-//
-//        val outputs = ArrayList<OutputConfiguration>(3).apply {
-//            add(OutputConfiguration(preview).apply { setPhysicalCameraId(widePhysicalId) })
-//            add(OutputConfiguration(requireNotNull(wideReader).surface).apply { setPhysicalCameraId(widePhysicalId) })
-//            add(OutputConfiguration(requireNotNull(ultraReader).surface).apply { setPhysicalCameraId(ultraPhysicalId) })
-//        }
+        val maxImages = if (format == ImageFormat.RAW_SENSOR) RAW_MAX_IMAGES else JPEG_MAX_IMAGES
 
         wideReader = ImageReader.newInstance(wideSize.width, wideSize.height, format, maxImages).apply {
             setOnImageAvailableListener({ reader -> onStillImageAvailable(isWide = true, reader = reader) }, handler)
@@ -998,51 +927,6 @@ class StereoCameraController(
             setOnImageAvailableListener({ reader -> onStillImageAvailable(isWide = false, reader = reader) }, handler)
         }
 
-        // Samsung workaround: add a tiny 3rd ImageReader stream (YUV) to the session.
-        // Several S24 reports indicate dual still streams only arrive reliably when a 3rd reader exists.
-//        val samsungHackEnabled = !phoneIsAPixel
-        // Only enable the Samsung dummy-stream hack for JPEG stills as raw doesn't work yet.
-        // Avoids mixing RAW + dummy YUV streams.
-//        val samsungHackEnabled = (!phoneIsAPixel) && (format == ImageFormat.JPEG)
-
-//        if (samsungHackEnabled) {
-//            // Prefer exact 176x144 if supported; otherwise pick the smallest supported YUV size.
-//            val dummySize: Size? = run {
-//                val sizes = wideMap?.getOutputSizes(ImageFormat.YUV_420_888)
-//                if (sizes == null || sizes.isEmpty()) {
-//                    null
-//                } else {
-//                    val exact = sizes.firstOrNull { it.width == 176 && it.height == 144 }
-//                    exact ?: sizes.minByOrNull { it.width.toLong() * it.height.toLong() }
-//                }
-//            }
-//
-//            samsungDummyReader = if (dummySize != null) {
-//                ImageReader.newInstance(dummySize.width, dummySize.height, ImageFormat.YUV_420_888, 2).apply {
-//                    setOnImageAvailableListener({ r ->
-//                        // Drain immediately; we only need this stream to exist + be targeted.
-//                        try { r.acquireLatestImage()?.close() } catch (_: Exception) {}
-//                    }, handler)
-//                }
-//            } else {
-//                null
-//            }
-//        } else {
-//            samsungDummyReader = null
-//        }
-
-//        val outputs = ArrayList<OutputConfiguration>(if (samsungDummyReader != null) 4 else 3).apply {
-//            add(OutputConfiguration(preview).apply { setPhysicalCameraId(widePhysicalId) })
-//            add(OutputConfiguration(requireNotNull(wideReader).surface).apply { setPhysicalCameraId(widePhysicalId) })
-//            add(OutputConfiguration(requireNotNull(ultraReader).surface).apply { setPhysicalCameraId(ultraPhysicalId) })
-//
-//            samsungDummyReader?.let { dummy ->
-//                // Bind dummy to the wide physical camera (matches the working S24 Java app).
-//                add(OutputConfiguration(dummy.surface).apply { setPhysicalCameraId(widePhysicalId) })
-//            }
-//        }
-
-        // making sure above isn't needed anymore, reverting to:
         val outputs = ArrayList<OutputConfiguration>(3).apply {
             add(OutputConfiguration(preview).apply { setPhysicalCameraId(widePhysicalId) })
             add(OutputConfiguration(requireNotNull(wideReader).surface).apply { setPhysicalCameraId(widePhysicalId) })
@@ -1107,7 +991,6 @@ class StereoCameraController(
                     session = sess
                     try {
                         val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-//                        val builder = createRequest(camera, CameraDevice.TEMPLATE_RECORD).apply {
                             addTarget(preview)
                             addTarget(wideEnc.inputSurface)
                             addTarget(ultraEnc.inputSurface)
@@ -1214,89 +1097,6 @@ class StereoCameraController(
     // Still capture
     // ---------------------------------------------------------------------------------------------
 
-    // before Samsung hack
-//    private fun doStillCapture(raw: Boolean) {
-//        val camera = cameraDevice ?: return
-//        val sess = session ?: return
-//        val handler = requireNotNull(cameraHandler)
-//
-//        val wideR = wideReader ?: run {
-//            callback.onError("Wide ImageReader not ready.")
-//            callback.onPhotoCaptureDone()
-//            return
-//        }
-//        val ultraR = ultraReader ?: run {
-//            callback.onError("Ultra ImageReader not ready.")
-//            callback.onPhotoCaptureDone()
-//            return
-//        }
-//
-//        val jpegOrientation = computeJpegOrientation()
-//
-//        try {
-//            try { sess.stopRepeating() } catch (_: Exception) {}
-//
-//            val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-//                addTarget(wideR.surface)
-//                addTarget(ultraR.surface)
-//
-//                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-//                set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-//
-//                set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
-//
-//                // Best-effort: ZSL/HDR off
-//                try { set(CaptureRequest.CONTROL_ENABLE_ZSL, false) } catch (_: Exception) {}
-//                set(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_DISABLED)
-//                set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-//
-//                applyCommonNoCropNoStab(this, isVideo = false)
-//                applyTorch(this)
-//
-//                if (!raw) {
-//                    set(CaptureRequest.JPEG_QUALITY, 100.toByte())
-//                    set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
-//                }
-//            }
-//
-//            sess.capture(
-//                builder.build(),
-//                object : CameraCaptureSession.CaptureCallback() {
-//                    override fun onCaptureCompleted(
-//                        session: CameraCaptureSession,
-//                        request: CaptureRequest,
-//                        result: TotalCaptureResult
-//                    ) {
-//                        val cap = currentPhoto
-//                        if (cap != null) {
-//                            cap.totalResult = result
-//                            tryFinalizePhotoIfReady()
-//                        }
-//                    }
-//
-//                    override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
-//                        callback.onError("Still capture failed: $failure")
-//                        failAndCleanupCurrentPhoto()
-//                    }
-//
-//                    override fun onCaptureSequenceCompleted(session: CameraCaptureSession, sequenceId: Int, frameNumber: Long) {
-//                        try {
-//                            val rb = repeatingBuilder
-//                            if (rb != null) {
-//                                session.setRepeatingRequest(rb.build(), null, handler)
-//                            }
-//                        } catch (_: Exception) {}
-//                    }
-//                },
-//                handler
-//            )
-//        } catch (e: Exception) {
-//            callback.onError("Still capture exception: ${e.message}")
-//            failAndCleanupCurrentPhoto()
-//        }
-//    }
-
-    // with Samsung hack
     private fun doStillCapture(raw: Boolean) {
         val camera = cameraDevice ?: return
         val sess = session ?: return
@@ -1315,29 +1115,18 @@ class StereoCameraController(
 
         val jpegOrientation = computeJpegOrientation()
         val samsungMode = !phoneIsAPixel
-//        val dummy = samsungDummyReader
         val preview = previewSurface
 
         // For watchdog to avoid nuking a later capture
         val capAtStart = currentPhoto
 
         try {
-            // Samsung: don’t stop repeating; keep pipeline warm.
-//            if (!samsungMode) {
-//                try { sess.stopRepeating() } catch (_: Exception) {}
-//            }
-            // test if we don't need it
             try { sess.stopRepeating() } catch (_: Exception) {}
 
             val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-//                // Critical: Samsung workaround - add the dummy reader as an extra target if present.
-//                if (samsungMode && dummy != null) {
-//                    addTarget(dummy.surface)
-//                } else if (samsungMode && preview != null) {
-//                    // If dummy wasn’t created for some reason, at least force a 3-target request.
-//                    addTarget(preview)
-//                }
-                // alt test: just add the preview and see if that works
+
+                // Critical: Samsung workaround - add the preview as an extra target if present
+                // for some unknown, reason, this makes photos work (removes crash) for samsung
                 if (samsungMode && preview != null) {
                     // force a 3-target request.
                     addTarget(preview)
@@ -1349,13 +1138,6 @@ class StereoCameraController(
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                 set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
 
-//                // Samsung still multi-cam can be finicky; HQ distortion correction sometimes wedges delivery.
-//                set(
-//                    CaptureRequest.DISTORTION_CORRECTION_MODE,
-//                    if (samsungMode) CaptureRequest.DISTORTION_CORRECTION_MODE_OFF
-//                    else CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
-//                )
-                // may not matter
                 set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
 
                 // Best-effort: ZSL/HDR off
@@ -1396,22 +1178,6 @@ class StereoCameraController(
                         failAndCleanupCurrentPhoto()
                     }
 
-//                    override fun onCaptureSequenceCompleted(
-//                        session: CameraCaptureSession,
-//                        sequenceId: Int,
-//                        frameNumber: Long
-//                    ) {
-//                        // Only restart repeating if we stopped it (Pixel path).
-//                        if (!samsungMode) {
-//                            try {
-//                                val rb = repeatingBuilder
-//                                if (rb != null) {
-//                                    session.setRepeatingRequest(rb.build(), null, handler)
-//                                }
-//                            } catch (_: Exception) {}
-//                        }
-//                    }
-                    // testing if not necessary for samsung
                     override fun onCaptureSequenceCompleted(session: CameraCaptureSession, sequenceId: Int, frameNumber: Long) {
                         try {
                             val rb = repeatingBuilder
@@ -1822,22 +1588,11 @@ class StereoCameraController(
         }
     }
 
-    // before Samsung hack
-//    private fun closeReaders() {
-//        try { wideReader?.close() } catch (_: Exception) {}
-//        try { ultraReader?.close() } catch (_: Exception) {}
-//        wideReader = null
-//        ultraReader = null
-//    }
-
-    private fun closeReaders() {
+     private fun closeReaders() {
         try { wideReader?.close() } catch (_: Exception) {}
         try { ultraReader?.close() } catch (_: Exception) {}
-//        try { samsungDummyReader?.close() } catch (_: Exception) {}
-
         wideReader = null
         ultraReader = null
-//        samsungDummyReader = null
     }
 
     private fun computeOrientationHint(): Int {
