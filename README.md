@@ -1,11 +1,13 @@
 # Dual Lens 3D Camera
 
-An android app (Pixel 7+ and some Samsung S-series) for taking stereo photos and video using
+An android app (Pixel 7+ and newer Samsung S-series) for taking stereo photos and video using
 the wide and ultrawide lenses.
 
-It's currently tested and working on Pixel 7, Pixel 7a, Pixel 7 Pro, Pixel 8, and Pixel 9a.
-It's likely but not yet guaranteed to work on any device Pixel 5 and up, since all of these devices
-have wide and ultrawide rear cameras. Samsung S models are "supported" but untested.
+It's currently tested and working on:
+- Samsung S24
+- Pixel 7, Pixel 7a, Pixel 7 Pro, Pixel 8, Pixel 8 Pro and Pixel 9a
+
+So far, photo and video sync is best on Pixel 7 series (~4ms).
 
 ### Where to find the APK
 
@@ -15,22 +17,14 @@ Check the latest release [here](../../releases).
 - Pixels: hold the phone in **portrait**.
 - Samsung: hold the phone in **landscape**.
 - Press the PHOTO or RECORD buttons to take photos or video.
-- Use ZOOM to toggle 1x / 2x (2x uses wide sensor crop when a device supports/exposes it).
+- Use 1x/2x toggle to zoom (2x uses wide sensor crop when a device supports/exposes it).
 - Outputs are stored in `Pictures/StereoCapture`.
-
-### How does it work?
-
-Modern Pixel phones arrange their wide and ultrawide lenses horizontally adjacent in the portrait 
-orientation. In other words, holding the phone in portrait orientation and taking photos with both
-lenses creates stereo pairs (assuming the ultrawide image is cropped correctly afterwards). The same
-goes for most Samsung phones except that their lenses are horizontally adjacent in the landscape
-orientation.
 
 ### Known issues
 
-For video, pairs of frames from the two lenses can be out of sync by as much as little as .7ms and 
-as much as 4ms. This is a relatively good result, but it's not perfect and there's essentially no
-way to improve it. For most video without too much fast action, this should be fine.
+- RAW shooting currently does not work on Samsung devices.
+- Left-Right photo sync is ~30ms on Samsung.
+- Left-Right photo sync is ~60ms on Pixel 8 Pro.
 
 ### Implementation Details
 
@@ -82,6 +76,3 @@ Optional per-recording JSON logging:
 Output files:
 - Photos/videos are saved to `Pictures/StereoCapture` with timestamped filenames:
   - `*_wide.*`, `*_ultrawide.*`, `*_sbs.jpg` (JPEG mode), and optional `*_stereo.json`.
-- SBS left/right ordering:
-  - Pixels: **LEFT = ultrawide**, **RIGHT = wide**.
-  - Samsung (assumed): **LEFT = wide**, **RIGHT = ultrawide**.

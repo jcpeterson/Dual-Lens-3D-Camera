@@ -1140,6 +1140,41 @@ class StereoCameraController(
 
                 set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
 
+                // attempt to lessen noise reduction
+                set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF)
+                // NOTE: NOISE_REDUCTION_MODE_OFF looks GREAT (sharper) in good light, and even
+                //   adds a nice non-smeary texture in somewhat lower light.
+                // NOTE: NOISE_REDUCTION_MODE_MINIMAL causes crash.
+                //   - Don't allow it as an option in UI settings when implemented.
+                // NOISE_REDUCTION_MODE_HIGH_QUALITY, NOISE_REDUCTION_MODE_FAST,
+                // NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG, and
+                // NOISE_REDUCTION_MODE_OFF all seem to work fine on Pixels.
+
+                // START: relevant to RAW only
+                // RAW quality: request lens shading map so DngCreator can embed it (if supported).
+                if (raw) {
+                    try {
+                        set(
+                            CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
+                            CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE_ON
+                        )
+                    } catch (_: Exception) {
+                    }
+                    setPhysical(
+                        this,
+                        widePhysicalId,
+                        CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
+                        CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE_ON
+                    )
+                    setPhysical(
+                        this,
+                        ultraPhysicalId,
+                        CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
+                        CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE_ON
+                    )
+                }
+                // END: relevant to RAW only
+
                 // Best-effort: ZSL/HDR off
                 try { set(CaptureRequest.CONTROL_ENABLE_ZSL, false) } catch (_: Exception) {}
                 set(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_DISABLED)
@@ -1342,8 +1377,22 @@ class StereoCameraController(
                     val wideCharacteristics = requireNotNull(wideChars)
                     val ultraCharacteristics = requireNotNull(ultraChars)
 
-                    saveDng(wideUri, wideCharacteristics, total, wideImage, exifDt)
-                    saveDng(ultraUri, ultraCharacteristics, total, ultraImage, exifDt)
+                    // START: new DNG improvements
+                    // Use per-physical TotalCaptureResult for correct color matrices, shading maps, etc.
+                    val physicalTotals: Map<String, TotalCaptureResult> = try {
+                        total.physicalCameraTotalResults
+                    } catch (_: Throwable) {
+                        emptyMap()
+                    }
+                    val wideTotal = physicalTotals[widePhysicalId] ?: total
+                    val ultraTotal = physicalTotals[ultraPhysicalId] ?: total
+
+                    saveDng(wideUri, wideCharacteristics, wideTotal, wideImage, exifDt)
+                    saveDng(ultraUri, ultraCharacteristics, ultraTotal, ultraImage, exifDt)
+                    // END: new DNG improvements
+
+//                    saveDng(wideUri, wideCharacteristics, total, wideImage, exifDt)
+//                    saveDng(ultraUri, ultraCharacteristics, total, ultraImage, exifDt)
 
                     MediaStoreUtils.finalizePending(resolver, wideUri)
                     MediaStoreUtils.finalizePending(resolver, ultraUri)
