@@ -1449,31 +1449,6 @@ class StereoCameraController(
         setExifDateTimeOriginal(uri, exifDateTimeOriginal, orientation)
     }
 
-//    private fun saveDng(
-//        uri: Uri,
-//        characteristics: CameraCharacteristics,
-//        result: TotalCaptureResult,
-//        image: Image,
-//        exifDateTimeOriginal: String
-//    ) {
-//        val dngCreator = android.hardware.camera2.DngCreator(characteristics, result)
-//
-//        // Match the same "upright" logic as JPEG/video, but convert degrees -> EXIF orientation constant.
-//        val orientationConst = exifOrientationFromDegrees(computeJpegOrientation())
-//        try {
-//            dngCreator.setOrientation(orientationConst)
-//        } catch (_: Exception) {
-//            // If it fails for any reason, we'll still try to set TAG_ORIENTATION via ExifInterface below.
-//        }
-//
-//        context.contentResolver.openOutputStream(uri)?.use { os ->
-//            dngCreator.writeImage(os, image)
-//            os.flush()
-//        } ?: throw IllegalStateException("openOutputStream failed for $uri")
-//
-//        // Set DateTimeOriginal (and enforce orientation tag as well for DNG viewers)
-//        setExifDateTimeOriginal(uri, exifDateTimeOriginal, orientationConst)
-//    }
     private fun saveDng(
         uri: Uri,
         characteristics: CameraCharacteristics,
