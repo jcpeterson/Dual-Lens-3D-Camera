@@ -145,8 +145,8 @@ class StereoCameraController(
     private var displayRotation: Int = Surface.ROTATION_0
 
     private var recordSize: Size = PREFERRED_RECORD_SIZE
-//    private var previewSize: Size = Size(1280, 960)
-    // TODO: don't hardcode; choose something small; settings page later
+    //    private var previewSize: Size = Size(1280, 960)
+    // Default fallback (overridden by settings)
     private var previewSize: Size = Size(800, 600)
 
     private var jpegWideSize: Size = PREFERRED_RECORD_SIZE
@@ -161,8 +161,20 @@ class StereoCameraController(
 
     // mutable video config (set from UI, persisted in Activity)
     private var requestedRecordSize: Size = Size(1440, 1080)  // default corresponds to upright 1080x1440
+    private var requestedRecordFps: Int = TARGET_FPS
     private var videoBitrateBps: Int = 50_000_000             // default 50 Mbps
     private var eisEnabled: Boolean = false                   // default OFF
+
+    // preview config (settings)
+    private var requestedPreviewSize: Size = Size(800, 600)
+    private var previewTargetFps: Int = TARGET_FPS
+
+    // photo tuning (settings)
+    private var photoNoiseReductionMode: Int = CaptureRequest.NOISE_REDUCTION_MODE_OFF
+    private var photoDistortionCorrectionMode: Int =
+        CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
+    private var photoEdgeMode: Int = CaptureRequest.EDGE_MODE_OFF
+
 
     // Preview repeating builder for current mode.
     private var repeatingBuilder: CaptureRequest.Builder? = null
@@ -209,19 +221,35 @@ class StereoCameraController(
         initialRawMode: Boolean,
         initialTorchOn: Boolean,
         initialRequestedRecordSize: Size,
+        initialRequestedRecordFps: Int,
         initialVideoBitrateBps: Int,
         initialEisEnabled: Boolean,
-        initialZoom2x: Boolean
+        initialZoom2x: Boolean,
+        initialPreviewSize: Size,
+        initialPreviewTargetFps: Int,
+        initialPhotoNoiseReductionMode: Int,
+        initialPhotoDistortionCorrectionMode: Int,
+        initialPhotoEdgeMode: Int
     ): PreviewConfig {
         this.surfaceTexture = surfaceTexture
         this.displayRotation = displayRotation
         this.isRawMode = initialRawMode
         this.torchOn = initialTorchOn
 
-        // NEW:
+        // video config
         this.requestedRecordSize = initialRequestedRecordSize
+        this.requestedRecordFps = initialRequestedRecordFps
         this.videoBitrateBps = initialVideoBitrateBps
         this.eisEnabled = initialEisEnabled
+
+        // preview config
+        this.requestedPreviewSize = initialPreviewSize
+        this.previewTargetFps = initialPreviewTargetFps
+
+        // photo tuning
+        this.photoNoiseReductionMode = initialPhotoNoiseReductionMode
+        this.photoDistortionCorrectionMode = initialPhotoDistortionCorrectionMode
+        this.photoEdgeMode = initialPhotoEdgeMode
 
         this.zoom2xEnabled = initialZoom2x
         // We'll pick the correct wide physical ID in selectCharacteristicsAndSizes() after LensDiscovery runs.
@@ -238,8 +266,14 @@ class StereoCameraController(
         return PreviewConfig(previewSize = previewSize, sensorOrientation = sensorOrientation, recordSize = recordSize)
     }
 
-    fun setVideoConfig(requestedRecordSize: Size, videoBitrateBps: Int, eisEnabled: Boolean) {
+    fun setVideoConfig(
+        requestedRecordSize: Size,
+        requestedRecordFps: Int,
+        videoBitrateBps: Int,
+        eisEnabled: Boolean
+    ) {
         this.requestedRecordSize = requestedRecordSize
+        this.requestedRecordFps = requestedRecordFps
         this.videoBitrateBps = videoBitrateBps
         this.eisEnabled = eisEnabled
 
@@ -258,18 +292,60 @@ class StereoCameraController(
         val wMap = wideMap ?: return
         val uMap = ultraMap ?: return
 
-        val (chosenRecord, fallbackMsg) = SizeSelector.chooseCommonFourByThreeSizeAt30FpsPrivate(
+        val (chosenRecord, fallbackMsg) = SizeSelector.chooseCommonPrivateSizeAtFps(
             wideMap = wMap,
             ultraMap = uMap,
             preferred = requestedRecordSize,
             maxW = requestedRecordSize.width,
             maxH = requestedRecordSize.height,
-            targetFps = TARGET_FPS
+            targetFps = requestedRecordFps
         )
         recordSize = chosenRecord
         fallbackMsg?.let { callback.onFallbackSizeUsed(it) }
 
-        Log.i(TAG, "VideoConfig requested=${requestedRecordSize.width}x${requestedRecordSize.height} chosen=${recordSize.width}x${recordSize.height} bitrate=$videoBitrateBps eis=$eisEnabled")
+        Log.i(
+            TAG,
+            "VideoConfig requested=${requestedRecordSize.width}x${requestedRecordSize.height}@${requestedRecordFps} chosen=${recordSize.width}x${recordSize.height} bitrate=$videoBitrateBps eis=$eisEnabled"
+        )
+    }
+
+    private fun recomputePreviewSizeLocked() {
+        val wMap = wideMap ?: return
+
+        val sizes = (wMap.getOutputSizes(SurfaceTexture::class.java) ?: emptyArray()).toList()
+        if (sizes.isEmpty()) {
+            previewSize = requestedPreviewSize
+            return
+        }
+
+        val exact = sizes.firstOrNull {
+            it.width == requestedPreviewSize.width && it.height == requestedPreviewSize.height
+        }
+        if (exact != null) {
+            previewSize = exact
+            return
+        }
+
+        val preferred = requestedPreviewSize
+        val preferredIs43 = SizeSelector.isFourByThree(preferred)
+
+        val candidates = if (preferredIs43) {
+            val fourByThree = sizes.filter { SizeSelector.isFourByThree(it) }
+            if (fourByThree.isNotEmpty()) fourByThree else sizes
+        } else {
+            sizes
+        }
+
+        val prefArea = preferred.width.toLong() * preferred.height.toLong()
+        val chosen = candidates.minByOrNull { s ->
+            val area = s.width.toLong() * s.height.toLong()
+            kotlin.math.abs(area - prefArea)
+        } ?: candidates.first()
+
+        previewSize = chosen
+        callback.onFallbackSizeUsed(
+            "Preview size ${preferred.width}x${preferred.height} not available; using ${chosen.width}x${chosen.height}."
+        )
     }
 
     fun stop() {
@@ -397,8 +473,16 @@ class StereoCameraController(
 
             val wMap = wideMap
             val uMap = ultraMap
+//            if (wMap != null && uMap != null) {
+//                recomputeRecordSizeLocked()
+//                jpegWideSize = SizeSelector.chooseLargestJpegFourByThree(wMap)
+//                jpegUltraSize = SizeSelector.chooseLargestJpegFourByThree(uMap)
+//                rawWideSize = SizeSelector.chooseLargestRaw(wMap)
+//                rawUltraSize = SizeSelector.chooseLargestRaw(uMap)
+//            }
             if (wMap != null && uMap != null) {
                 recomputeRecordSizeLocked()
+                recomputePreviewSizeLocked()
                 jpegWideSize = SizeSelector.chooseLargestJpegFourByThree(wMap)
                 jpegUltraSize = SizeSelector.chooseLargestJpegFourByThree(uMap)
                 rawWideSize = SizeSelector.chooseLargestRaw(wMap)
@@ -529,7 +613,7 @@ class StereoCameraController(
                     tag = "WideVideoEncoder",
                     width = recordSize.width,
                     height = recordSize.height,
-                    fps = TARGET_FPS,
+                    fps = requestedRecordFps,
                     bitrateBps = videoBitrateBps,
                     iFrameIntervalSec = IFRAME_INTERVAL_SEC,
                     muxer = requireNotNull(wideMuxer)
@@ -539,11 +623,30 @@ class StereoCameraController(
                     tag = "UltraVideoEncoder",
                     width = recordSize.width,
                     height = recordSize.height,
-                    fps = TARGET_FPS,
+                    fps = requestedRecordFps,
                     bitrateBps = videoBitrateBps,
                     iFrameIntervalSec = IFRAME_INTERVAL_SEC,
                     muxer = requireNotNull(ultraMuxer)
                 ).also { it.start() }
+//                wideEncoder = VideoEncoder(
+//                    tag = "WideVideoEncoder",
+//                    width = recordSize.width,
+//                    height = recordSize.height,
+//                    fps = TARGET_FPS,
+//                    bitrateBps = videoBitrateBps,
+//                    iFrameIntervalSec = IFRAME_INTERVAL_SEC,
+//                    muxer = requireNotNull(wideMuxer)
+//                ).also { it.start() }
+//
+//                ultraEncoder = VideoEncoder(
+//                    tag = "UltraVideoEncoder",
+//                    width = recordSize.width,
+//                    height = recordSize.height,
+//                    fps = TARGET_FPS,
+//                    bitrateBps = videoBitrateBps,
+//                    iFrameIntervalSec = IFRAME_INTERVAL_SEC,
+//                    muxer = requireNotNull(ultraMuxer)
+//                ).also { it.start() }
 
                 if (ENABLE_STEREO_RECORDING_LOG) {
                     // for logging (create one JSON per recording)
@@ -573,7 +676,8 @@ class StereoCameraController(
                         widePhysicalId = widePhysicalId,
                         ultraPhysicalId = ultraPhysicalId,
                         recordSize = recordSize,
-                        targetFps = TARGET_FPS,
+//                        targetFps = TARGET_FPS,
+                        targetFps = requestedRecordFps,
                         videoBitrateBps = videoBitrateBps,
                         eisEnabled = eisEnabled,
                         orientationHintDegrees = orient,
@@ -836,6 +940,7 @@ class StereoCameraController(
         val uMap = requireNotNull(ultraMap)
 
         recomputeRecordSizeLocked()
+        recomputePreviewSizeLocked()
 
         jpegWideSize = SizeSelector.chooseLargestJpegFourByThree(wMap)
         jpegUltraSize = SizeSelector.chooseLargestJpegFourByThree(uMap)
@@ -944,7 +1049,8 @@ class StereoCameraController(
                             addTarget(preview)
                             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-                            applyCommonNoCropNoStab(this, isVideo = false)
+                            //applyCommonNoCropNoStab(this, isVideo = false)
+                            applyCommonNoCropNoStab(this, isVideo = false, targetFps = previewTargetFps)
                             applyTorch(this)
                         }
                         repeatingBuilder = builder
@@ -995,8 +1101,9 @@ class StereoCameraController(
                             addTarget(wideEnc.inputSurface)
                             addTarget(ultraEnc.inputSurface)
 
-                            applyCommonNoCropNoStab(this, isVideo = true)
-                            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(TARGET_FPS, TARGET_FPS))
+//                            applyCommonNoCropNoStab(this, isVideo = true)
+                            applyCommonNoCropNoStab(this, isVideo = true, targetFps = requestedRecordFps)
+//                            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(TARGET_FPS, TARGET_FPS))
                             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
                             applyTorch(this)
@@ -1138,10 +1245,17 @@ class StereoCameraController(
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                 set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
 
-                set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
+//                set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
+//
+//                // attempt to lessen noise reduction
+//                set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF)
+                try { set(CaptureRequest.DISTORTION_CORRECTION_MODE, photoDistortionCorrectionMode) } catch (_: Exception) {}
 
                 // attempt to lessen noise reduction
-                set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF)
+                try { set(CaptureRequest.NOISE_REDUCTION_MODE, photoNoiseReductionMode) } catch (_: Exception) {}
+
+                try { set(CaptureRequest.EDGE_MODE, photoEdgeMode) } catch (_: Exception) {}
+
                 // NOTE: NOISE_REDUCTION_MODE_OFF looks GREAT (sharper) in good light, and even
                 //   adds a nice non-smeary texture in somewhat lower light.
                 // NOTE: NOISE_REDUCTION_MODE_MINIMAL causes crash.
@@ -1180,7 +1294,8 @@ class StereoCameraController(
                 set(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_DISABLED)
                 set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
 
-                applyCommonNoCropNoStab(this, isVideo = false)
+                //applyCommonNoCropNoStab(this, isVideo = false)
+                applyCommonNoCropNoStab(this, isVideo = false, targetFps = previewTargetFps)
                 applyTorch(this)
 
                 if (!raw) {
@@ -1605,7 +1720,59 @@ class StereoCameraController(
         }
     }
 
-    private fun applyCommonNoCropNoStab(builder: CaptureRequest.Builder, isVideo: Boolean) {
+//    private fun applyCommonNoCropNoStab(builder: CaptureRequest.Builder, isVideo: Boolean) {
+//
+//        // EIS toggle (video only)
+//        if (isVideo && eisEnabled) {
+//            builder.set(
+//                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+//                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+//            )
+//            builder.set(
+//                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+//                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+//            )
+//        } else {
+//            builder.set(
+//                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+//                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+//            )
+//            builder.set(
+//                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+//                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
+//            )
+//        }
+//
+//        // Target FPS (logical + per-physical best effort)
+//        val fpsRange = Range(TARGET_FPS, TARGET_FPS)
+//        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+//        setPhysical(builder, widePhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+//        setPhysical(builder, ultraPhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+//
+//        builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+//
+//        // constrain ultrawide 3A to overlap-ish center region
+//        applyUltrawide3ARegions(builder)
+//    }
+    private fun chooseAeFpsRange(chars: CameraCharacteristics?, desiredFps: Int): Range<Int>? {
+        val ranges = chars?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
+
+        // Prefer a locked range if the device exposes it.
+        ranges.firstOrNull { it.lower == desiredFps && it.upper == desiredFps }?.let { return it }
+
+        val candidates = ranges.filter { it.lower <= desiredFps && it.upper >= desiredFps }
+        if (candidates.isEmpty()) {
+            // Fallback: pick the highest available range.
+            return ranges.maxByOrNull { it.upper }
+        }
+
+        // Choose the tightest range that still contains desiredFps.
+        return candidates.minWithOrNull(
+            compareBy<Range<Int>> { it.upper - it.lower }.thenBy { it.lower }
+        ) ?: candidates.first()
+    }
+
+    private fun applyCommonNoCropNoStab(builder: CaptureRequest.Builder, isVideo: Boolean, targetFps: Int) {
 
         // EIS toggle (video only)
         if (isVideo && eisEnabled) {
@@ -1629,10 +1796,27 @@ class StereoCameraController(
         }
 
         // Target FPS (logical + per-physical best effort)
-        val fpsRange = Range(TARGET_FPS, TARGET_FPS)
-        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
-        setPhysical(builder, widePhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
-        setPhysical(builder, ultraPhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+        val logicalRange =
+            chooseAeFpsRange(logicalChars, targetFps)
+                ?: chooseAeFpsRange(wideChars, targetFps)
+                ?: chooseAeFpsRange(ultraChars, targetFps)
+
+        if (logicalRange != null) {
+            try {
+                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, logicalRange)
+            } catch (_: Exception) {
+            }
+        }
+
+        val wideRange = chooseAeFpsRange(wideChars, targetFps) ?: logicalRange
+        if (wideRange != null) {
+            setPhysical(builder, widePhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, wideRange)
+        }
+
+        val ultraRange = chooseAeFpsRange(ultraChars, targetFps) ?: logicalRange
+        if (ultraRange != null) {
+            setPhysical(builder, ultraPhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, ultraRange)
+        }
 
         builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
 

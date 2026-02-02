@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <PreferenceCategory
+        android:key="photo_category"
+        android:title="Photo settings">
+
+        <ListPreference
+            android:key="photo_noise_reduction"
+            android:title="Noise reduction"
+            android:defaultValue="off"/>
+
+        <ListPreference
+            android:key="photo_distortion_correction"
+            android:title="Distortion correction"
+            android:defaultValue="hq"/>
+
+        <ListPreference
+            android:key="photo_edge_mode"
+            android:title="Edge mode"
+            android:defaultValue="off"/>
+
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        android:key="video_category"
+        android:title="Video settings">
+
+        <ListPreference
+            android:key="video_resolution"
+            android:title="Video resolution"
+            android:defaultValue=""/>
+
+        <ListPreference
+            android:key="video_fps"
+            android:title="Video frame rate"
+            android:defaultValue="30"/>
+
+        <ListPreference
+            android:key="video_bitrate_mbps"
+            android:title="Video bitrate (Mbps)"
+            android:defaultValue="50"/>
+
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        android:key="preview_category"
+        android:title="Preview / viewfinder">
+
+        <ListPreference
+            android:key="preview_resolution"
+            android:title="Preview resolution"
+            android:defaultValue="800x600"/>
+
+        <ListPreference
+            android:key="preview_fps"
+            android:title="Target frame rate"
+            android:defaultValue="30"/>
+
+    </PreferenceCategory>
+
+</PreferenceScreen>

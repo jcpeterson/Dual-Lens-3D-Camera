@@ -2,10 +2,12 @@ package com.example.duallens3dcamera
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
+import android.hardware.camera2.CaptureRequest
 import android.os.Bundle
 import android.os.Looper
 import android.util.Size
@@ -15,6 +17,8 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.example.duallens3dcamera.settings.AppSettings
+import com.example.duallens3dcamera.settings.SettingsActivity
 import com.example.duallens3dcamera.camera.StereoCameraController
 import com.example.duallens3dcamera.databinding.ActivityMainBinding
 import java.text.SimpleDateFormat
@@ -28,21 +32,25 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
     private lateinit var controller: StereoCameraController
 
     // ---- persisted settings ----
-    private val prefs by lazy { getSharedPreferences("stereo_capture_prefs", Context.MODE_PRIVATE) }
-
-    // Video resolution choices shown as vertical number only.
-    // Internally mapped to 4:3 landscape sizes (w=vertical, h=vertical*3/4),
-    // then rotated via muxer orientation hint to be upright portrait.
-    private val videoVerticalOptions = listOf(1440, 1920, 2560, 4000) // shown on button
-    private var videoResIndex: Int = 0 // default 1440 => 1080x1440 upright
-
-    private val bitrateOptionsMbps = listOf(50, 100, 200)
-    private var bitrateIndex: Int = 0 // default 50
+    private val prefs by lazy { getSharedPreferences(AppSettings.PREFS_NAME, Context.MODE_PRIVATE) }
 
     private var eisEnabled: Boolean = false // default OFF
     private var rawMode: Boolean = false // default JPG
     private var torchOn: Boolean = false // not persisted (you didn't ask)
     private var zoom2xEnabled: Boolean = false // default 1x
+
+    // Settings screen (loaded from SharedPreferences)
+    private var videoResolution: Size = Size(1440, 1080)
+    private var videoFps: Int = 30
+    private var videoBitrateBps: Int = 50_000_000
+
+    private var previewResolution: Size = Size(800, 600)
+    private var previewFps: Int = 30
+
+    private var photoNoiseReductionMode: Int = CaptureRequest.NOISE_REDUCTION_MODE_OFF
+    private var photoDistortionCorrectionMode: Int =
+        CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
+    private var photoEdgeMode: Int = CaptureRequest.EDGE_MODE_OFF
 
 
     // ---- UI state flags ----
@@ -85,20 +93,25 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         updateTorchButton()
         updateUi()
 
-        binding.btnVideoRes.setOnClickListener {
-            if (isRecording || isBusy) return@setOnClickListener
-            videoResIndex = (videoResIndex + 1) % videoVerticalOptions.size
-            savePrefs()
-            updateVideoResButton()
-            applyVideoConfigToController()
-        }
+//        binding.btnVideoRes.setOnClickListener {
+//            if (isRecording || isBusy) return@setOnClickListener
+//            videoResIndex = (videoResIndex + 1) % videoVerticalOptions.size
+//            savePrefs()
+//            updateVideoResButton()
+//            applyVideoConfigToController()
+//        }
+//
+//        binding.btnBitrate.setOnClickListener {
+//            if (isRecording || isBusy) return@setOnClickListener
+//            bitrateIndex = (bitrateIndex + 1) % bitrateOptionsMbps.size
+//            savePrefs()
+//            updateBitrateButton()
+//            applyVideoConfigToController()
+//        }
 
-        binding.btnBitrate.setOnClickListener {
+        binding.btnSettings.setOnClickListener {
             if (isRecording || isBusy) return@setOnClickListener
-            bitrateIndex = (bitrateIndex + 1) % bitrateOptionsMbps.size
-            savePrefs()
-            updateBitrateButton()
-            applyVideoConfigToController()
+            startActivity(Intent(this, SettingsActivity::class.java))
         }
 
         binding.btnEis.setOnClickListener {
@@ -190,14 +203,29 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         }
     }
 
+//    override fun onResume() {
+//        super.onResume()
+//        if (!hasAllPermissions()) {
+//            requestPermissions()
+//        } else {
+//            maybeStartCamera()
+//        }
+//    }
     override fun onResume() {
         super.onResume()
         if (!hasAllPermissions()) {
             requestPermissions()
         } else {
+            AppSettings.ensureCameraBasedDefaults(this)
+            loadPrefs()
+            updateTopBarUi()
+            updateZoomButton()
+            updateTorchButton()
+            updateUi()
             maybeStartCamera()
         }
     }
+
 
     override fun onPause() {
         controller.stop()
@@ -213,15 +241,32 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         val st = binding.textureView.surfaceTexture ?: return
         val rotation = display?.rotation ?: Surface.ROTATION_0
 
+//        previewConfig = controller.start(
+//            surfaceTexture = st,
+//            displayRotation = rotation,
+//            initialRawMode = rawMode,
+//            initialTorchOn = torchOn,
+//            initialRequestedRecordSize = currentRequestedRecordSize(),
+//            initialVideoBitrateBps = currentVideoBitrateBps(),
+//            initialEisEnabled = eisEnabled,
+//            initialZoom2x = zoom2xEnabled
+//        )
+
         previewConfig = controller.start(
             surfaceTexture = st,
             displayRotation = rotation,
             initialRawMode = rawMode,
             initialTorchOn = torchOn,
             initialRequestedRecordSize = currentRequestedRecordSize(),
+            initialRequestedRecordFps = currentVideoFps(),
             initialVideoBitrateBps = currentVideoBitrateBps(),
             initialEisEnabled = eisEnabled,
-            initialZoom2x = zoom2xEnabled
+            initialZoom2x = zoom2xEnabled,
+            initialPreviewSize = previewResolution,
+            initialPreviewTargetFps = previewFps,
+            initialPhotoNoiseReductionMode = photoNoiseReductionMode,
+            initialPhotoDistortionCorrectionMode = photoDistortionCorrectionMode,
+            initialPhotoEdgeMode = photoEdgeMode
         )
 
         binding.textureView.post {
@@ -241,45 +286,45 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
 
     // ---------------- prefs ----------------
 
-    private fun loadPrefs() {
-        videoResIndex = prefs.getInt("videoResIndex", 0).coerceIn(0, videoVerticalOptions.size - 1)
-        bitrateIndex = prefs.getInt("bitrateIndex", 0).coerceIn(0, bitrateOptionsMbps.size - 1)
-        eisEnabled = prefs.getBoolean("eisEnabled", false)
-        rawMode = prefs.getBoolean("rawMode", false)
-        zoom2xEnabled = prefs.getBoolean("zoom2xEnabled", false)
-    }
-
-    private fun savePrefs() {
-        prefs.edit()
-            .putInt("videoResIndex", videoResIndex)
-            .putInt("bitrateIndex", bitrateIndex)
-            .putBoolean("eisEnabled", eisEnabled)
-            .putBoolean("rawMode", rawMode)
-            .putBoolean("zoom2xEnabled", zoom2xEnabled)
-            .apply()
-    }
-
-    // ---------------- top bar UI ----------------
-
+//    private fun loadPrefs() {
+//        videoResIndex = prefs.getInt("videoResIndex", 0).coerceIn(0, videoVerticalOptions.size - 1)
+//        bitrateIndex = prefs.getInt("bitrateIndex", 0).coerceIn(0, bitrateOptionsMbps.size - 1)
+//        eisEnabled = prefs.getBoolean("eisEnabled", false)
+//        rawMode = prefs.getBoolean("rawMode", false)
+//        zoom2xEnabled = prefs.getBoolean("zoom2xEnabled", false)
+//    }
+//
+//    private fun savePrefs() {
+//        prefs.edit()
+//            .putInt("videoResIndex", videoResIndex)
+//            .putInt("bitrateIndex", bitrateIndex)
+//            .putBoolean("eisEnabled", eisEnabled)
+//            .putBoolean("rawMode", rawMode)
+//            .putBoolean("zoom2xEnabled", zoom2xEnabled)
+//            .apply()
+//    }
+//
+//    // ---------------- top bar UI ----------------
+//
     private fun updateZoomButton() {
         binding.btnZoom.text = if (zoom2xEnabled) "2x" else "1x"
     }
-
-    private fun updateTopBarUi() {
-        updateVideoResButton()
-        updateBitrateButton()
-        updateEisButton()
-        updateFormatButton()
-    }
-
-    private fun updateVideoResButton() {
-        binding.btnVideoRes.text = videoVerticalOptions[videoResIndex].toString()
-    }
-
-    private fun updateBitrateButton() {
-        binding.btnBitrate.text = "${bitrateOptionsMbps[bitrateIndex]}"
-    }
-
+//
+//    private fun updateTopBarUi() {
+//        updateVideoResButton()
+//        updateBitrateButton()
+//        updateEisButton()
+//        updateFormatButton()
+//    }
+//
+//    private fun updateVideoResButton() {
+//        binding.btnVideoRes.text = videoVerticalOptions[videoResIndex].toString()
+//    }
+//
+//    private fun updateBitrateButton() {
+//        binding.btnBitrate.text = "${bitrateOptionsMbps[bitrateIndex]}"
+//    }
+//
     private fun updateEisButton() {
         binding.btnEis.text = "EIS"
         val base = binding.btnEis.paintFlags and Paint.STRIKE_THRU_TEXT_FLAG.inv()
@@ -301,22 +346,65 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
             binding.btnTorch.backgroundTintList = ContextCompat.getColorStateList(this, android.R.color.black)
         }
     }
+//
+//    private fun currentRequestedRecordSize(): Size {
+//        val vertical = videoVerticalOptions[videoResIndex]      // e.g. 1440
+//        val horizontal = (vertical * 3) / 4                    // e.g. 1080
+//        // Use landscape 4:3 (w > h). Muxer orientationHint rotates to portrait.
+//        return Size(vertical, horizontal)                       // e.g. 1440x1080
+//    }
+//
+//    private fun currentVideoBitrateBps(): Int {
+//        val mbps = bitrateOptionsMbps[bitrateIndex]
+//        return mbps * 1_000_000
+//    }
+//
+//    private fun applyVideoConfigToController() {
+//        controller.setVideoConfig(
+//            requestedRecordSize = currentRequestedRecordSize(),
+//            videoBitrateBps = currentVideoBitrateBps(),
+//            eisEnabled = eisEnabled
+//        )
+//    }
 
-    private fun currentRequestedRecordSize(): Size {
-        val vertical = videoVerticalOptions[videoResIndex]      // e.g. 1440
-        val horizontal = (vertical * 3) / 4                    // e.g. 1080
-        // Use landscape 4:3 (w > h). Muxer orientationHint rotates to portrait.
-        return Size(vertical, horizontal)                       // e.g. 1440x1080
+    private fun loadPrefs() {
+        eisEnabled = prefs.getBoolean(AppSettings.KEY_EIS_ENABLED, false)
+        rawMode = prefs.getBoolean(AppSettings.KEY_RAW_MODE, false)
+        zoom2xEnabled = prefs.getBoolean(AppSettings.KEY_ZOOM_2X, false)
+
+        videoResolution = AppSettings.getVideoResolution(this)
+        videoFps = AppSettings.getVideoFps(this)
+        videoBitrateBps = AppSettings.getVideoBitrateBps(this)
+
+        previewResolution = AppSettings.getPreviewResolution(this)
+        previewFps = AppSettings.getPreviewFps(this)
+
+        photoNoiseReductionMode = AppSettings.getPhotoNoiseReductionMode(this)
+        photoDistortionCorrectionMode = AppSettings.getPhotoDistortionCorrectionMode(this)
+        photoEdgeMode = AppSettings.getPhotoEdgeMode(this)
     }
 
-    private fun currentVideoBitrateBps(): Int {
-        val mbps = bitrateOptionsMbps[bitrateIndex]
-        return mbps * 1_000_000
+    private fun savePrefs() {
+        prefs.edit()
+            .putBoolean(AppSettings.KEY_EIS_ENABLED, eisEnabled)
+            .putBoolean(AppSettings.KEY_RAW_MODE, rawMode)
+            .putBoolean(AppSettings.KEY_ZOOM_2X, zoom2xEnabled)
+            .apply()
     }
+
+    private fun updateTopBarUi() {
+        updateEisButton()
+        updateFormatButton()
+    }
+
+    private fun currentRequestedRecordSize(): Size = videoResolution
+    private fun currentVideoFps(): Int = videoFps
+    private fun currentVideoBitrateBps(): Int = videoBitrateBps
 
     private fun applyVideoConfigToController() {
         controller.setVideoConfig(
             requestedRecordSize = currentRequestedRecordSize(),
+            requestedRecordFps = currentVideoFps(),
             videoBitrateBps = currentVideoBitrateBps(),
             eisEnabled = eisEnabled
         )
@@ -344,8 +432,12 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         }
 
         val topEnabled = (!isBusy && !isRecording)
-        setEnabledStyle(binding.btnVideoRes, topEnabled, android.R.color.black, android.R.color.white)
-        setEnabledStyle(binding.btnBitrate, topEnabled, android.R.color.black, android.R.color.white)
+//        setEnabledStyle(binding.btnVideoRes, topEnabled, android.R.color.black, android.R.color.white)
+//        setEnabledStyle(binding.btnBitrate, topEnabled, android.R.color.black, android.R.color.white)
+//        setEnabledStyle(binding.btnEis, topEnabled, android.R.color.black, android.R.color.white)
+//        setEnabledStyle(binding.btnFormat, topEnabled, android.R.color.black, android.R.color.white)
+//        setEnabledStyle(binding.btnZoom, topEnabled, android.R.color.black, android.R.color.white)
+        setEnabledStyle(binding.btnSettings, topEnabled, android.R.color.black, android.R.color.white)
         setEnabledStyle(binding.btnEis, topEnabled, android.R.color.black, android.R.color.white)
         setEnabledStyle(binding.btnFormat, topEnabled, android.R.color.black, android.R.color.white)
         setEnabledStyle(binding.btnZoom, topEnabled, android.R.color.black, android.R.color.white)

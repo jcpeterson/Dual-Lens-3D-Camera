@@ -115,6 +115,55 @@ object SizeSelector {
         return sizes.maxByOrNull { it.width.toLong() * it.height.toLong() }
     }
 
+    fun chooseCommonPrivateSizeAtFps(
+        wideMap: StreamConfigurationMap,
+        ultraMap: StreamConfigurationMap,
+        preferred: Size,
+        maxW: Int,
+        maxH: Int,
+        targetFps: Int
+    ): Pair<Size, String?> {
+        val wideSizes = (wideMap.getOutputSizes(ImageFormat.PRIVATE) ?: emptyArray())
+            .filter { it.width <= maxW && it.height <= maxH }
+            .filter { supportsFps(wideMap, ImageFormat.PRIVATE, it, targetFps) }
+
+        val ultraSizes = (ultraMap.getOutputSizes(ImageFormat.PRIVATE) ?: emptyArray())
+            .filter { it.width <= maxW && it.height <= maxH }
+            .filter { supportsFps(ultraMap, ImageFormat.PRIVATE, it, targetFps) }
+
+        val ultraSet = ultraSizes.map { it.width to it.height }.toSet()
+        val common = wideSizes.filter { ultraSet.contains(it.width to it.height) }
+
+        if (common.isEmpty()) {
+            Log.w(TAG, "No common PRIVATE sizes found at ${targetFps}fps. Falling back.")
+            val fallback = wideSizes.maxByOrNull { it.width.toLong() * it.height.toLong() } ?: preferred
+            return fallback to "No common PRIVATE size at ${targetFps}fps; using ${fallback.width}x${fallback.height}."
+        }
+
+        val exact = common.firstOrNull { it.width == preferred.width && it.height == preferred.height }
+        if (exact != null) return exact to null
+
+        val sameAspect = common.filter { approxSameAspect(it, preferred) }
+        val candidates = if (sameAspect.isNotEmpty()) sameAspect else common
+
+        val best = candidates.maxBy { it.width.toLong() * it.height.toLong() }
+        return best to "Requested ${preferred.width}x${preferred.height}@${targetFps} not available; using ${best.width}x${best.height}@${targetFps}."
+    }
+
+    private fun aspectRatio(size: Size): Float {
+        val w = size.width.toFloat()
+        val h = size.height.toFloat()
+        if (h == 0f) return 0f
+        return w / h
+    }
+
+    private fun approxSameAspect(a: Size, b: Size, tolerance: Float = 0.02f): Boolean {
+        val arA = aspectRatio(a)
+        val arB = aspectRatio(b)
+        if (arA == 0f || arB == 0f) return false
+        return abs(arA - arB) <= tolerance
+    }
+
     private fun supportsFps(map: StreamConfigurationMap, format: Int, size: Size, fps: Int): Boolean {
         val minFrameDurationNs = try {
             map.getOutputMinFrameDuration(format, size)
