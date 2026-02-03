@@ -4,10 +4,12 @@ An android app (Pixel 7+ and newer Samsung S-series) for taking stereo photos an
 the wide and ultrawide lenses.
 
 It's currently tested and working on:
-- Samsung S24
-- Pixel 7, Pixel 7a, Pixel 7 Pro, Pixel 8, Pixel 8 Pro and Pixel 9a
+- Samsung S24 and Fold5.
+- Pixel 7, 7a, 7 Pro, 8, 8 Pro, 9a, and 10.
 
 So far, photo and video sync is best on Pixel 7 series (~4ms).
+
+Phones with ultrawide autofocus (e.g., Pixel 7 Pro) will provide the best image quality.
 
 ### Where to find the APK
 
@@ -23,6 +25,8 @@ Check the latest release [here](../../releases).
 ### Known issues
 
 - RAW shooting currently does not work on Samsung devices.
+- Not working at all on Samsung S22 or FE models.
+- Alignment not working on Samsung Fold5.
 - Left-Right photo sync is ~30ms on Samsung.
 - Left-Right photo sync is ~60ms on Pixel 8 Pro.
 
