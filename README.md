@@ -7,7 +7,7 @@ It's currently tested and working on:
 - Samsung S24 and Fold5.
 - Pixel 7, 7a, 7 Pro, 8, 8 Pro, 9a, and 10.
 
-So far, photo and video sync is best on Pixel 7 series (~4ms).
+So far, photo and video sync is best on Pixel 7 series (~2ms for photos, ~4ms for video).
 
 Phones with ultrawide autofocus (e.g., Pixel 7 Pro) will provide the best image quality.
 
@@ -29,6 +29,45 @@ Check the latest release [here](../../releases).
 - Alignment not working on Samsung Fold5.
 - Left-Right photo sync is ~30ms on Samsung.
 - Left-Right photo sync is ~60ms on Pixel 8 Pro.
+
+### How to assess sync between left and right photos
+
+Method 1 (easiest):
+1. Enable "Photo sync toast" in the settings.
+2. A brief message will be displayed.
+3. `Δstart` is the difference in sensor timestamps (wide - ultra).
+4. `overlap` is the duration where both lenses were integrating light at the same time.
+
+Method 2 (advanced / more detail):
+1. Enable "Stereo photo JSON log" in the settings.
+2. Take a photo. Then check your `Documents/StereoCapture` folder for the json output.
+
+The JSON file contains several fields, such as:
+
+- `sensorTimestampMs`: start time of exposure (milliseconds, monotonic sensor clock)
+- `exposureTimeMs`: how long the sensor integrated light (milliseconds)
+- `deltaStartMs`: difference in sensor timestamps (wide - ultra)
+- `overlapMs`: duration where both lenses were integrating light at the same time
+- `nonOverlapMs`: duration where exactly one lens was integrating (wide+ultra - 2*overlap)
+- `idleGapMs`: if exposures are disjoint, time when neither lens was integrating (else 0)
+- `unionMs`: total span from earliest start to latest end (overlap + nonOverlap + idleGap)
+- `overlapPctOfShorter`: % of shorter exposure was that was simultaneous
+- `overlapPctOfLonger`: % of longer exposure was that was simultaneous
+
+### How to assess sync between left and right videos
+
+1. Enable "Stereo video JSON log" in the settings.
+2. Optional: Enable "frames only" for less logging detail.
+3. Take a video. Then check your `Documents/StereoCapture` folder for the json output.
+
+The JSON file contains several fields, such as:
+- `frameNumber`: `TotalCaptureResult.frameNumber` for the capture request.
+- `sensorTimestampNs`: `CaptureResult.SENSOR_TIMESTAMP` (nanoseconds).
+This is the **start of exposure** of the first sensor row.
+- `exposureTimeNs` (full mode): `CaptureResult.SENSOR_EXPOSURE_TIME`.
+- `codecPresentationTimeUs` (full mode): `MediaCodec.BufferInfo.presentationTimeUs`.
+- `muxerPresentationTimeUs` (full mode): the PTS written to `MediaMuxer` (per-track normalized to
+start at 0 in this app).
 
 ### Implementation Details
 
@@ -68,14 +107,6 @@ Optional per-recording JSON logging:
 - Two modes exist:
     - **framesOnly**: logs only `{frameNumber, sensorTimestampNs}` per lens.
     - **full**: also logs exposure time and encoder/muxer timestamps.
-- Key fields:
-    - `frameNumber`: `TotalCaptureResult.frameNumber` for the capture request.
-    - `sensorTimestampNs`: `CaptureResult.SENSOR_TIMESTAMP` (nanoseconds; typically REALTIME on Pixel).
-      This is the **start of exposure** of the first sensor row.
-    - `exposureTimeNs` (full mode): `CaptureResult.SENSOR_EXPOSURE_TIME`.
-    - `codecPresentationTimeUs` (full mode): `MediaCodec.BufferInfo.presentationTimeUs`.
-    - `muxerPresentationTimeUs` (full mode): the PTS written to `MediaMuxer` (per-track normalized to
-      start at 0 in this app).
 
 Output files:
 - Photos/videos are saved to `Pictures/StereoCapture` with timestamped filenames:

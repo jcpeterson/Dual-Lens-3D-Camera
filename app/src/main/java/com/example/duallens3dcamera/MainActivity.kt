@@ -382,6 +382,21 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         photoNoiseReductionMode = AppSettings.getPhotoNoiseReductionMode(this)
         photoDistortionCorrectionMode = AppSettings.getPhotoDistortionCorrectionMode(this)
         photoEdgeMode = AppSettings.getPhotoEdgeMode(this)
+
+        // Settings-only configs that the controller reads later (recording/stills),
+        // so they don't need to be passed into controller.start(...).
+        controller.setVideoProcessingModes(
+            noiseReductionMode = AppSettings.getVideoNoiseReductionMode(this),
+            distortionCorrectionMode = AppSettings.getVideoDistortionCorrectionMode(this),
+            edgeMode = AppSettings.getVideoEdgeMode(this)
+        )
+
+        controller.setDebugConfig(
+            enableStereoRecordingLog = AppSettings.getDebugVideoLogEnabled(this),
+            stereoLogFramesOnly = AppSettings.getDebugVideoLogFramesOnly(this),
+            enablePhotoJsonLog = AppSettings.getDebugPhotoJsonLogEnabled(this),
+            enablePhotoSyncToast = AppSettings.getDebugPhotoSyncToastEnabled(this)
+        )
     }
 
     private fun savePrefs() {

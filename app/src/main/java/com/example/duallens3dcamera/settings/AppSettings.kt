@@ -31,12 +31,25 @@ object AppSettings {
     const val KEY_VIDEO_FPS = "video_fps"                     // "30"
     const val KEY_VIDEO_BITRATE_MBPS = "video_bitrate_mbps"   // "50"
 
-    const val KEY_PREVIEW_RESOLUTION = "preview_resolution"   // "800x600"
-    const val KEY_PREVIEW_FPS = "preview_fps"                 // "30"
+    // Video processing (applied to recording request only; preview is forced OFF)
+    const val KEY_VIDEO_NOISE_REDUCTION = "video_noise_reduction" // "off" | "fast" | "hq"
+    const val KEY_VIDEO_DISTORTION_CORRECTION = "video_distortion_correction" // "off" | "fast" | "hq"
+    const val KEY_VIDEO_EDGE_MODE = "video_edge_mode" // "off" | "fast" | "hq"
 
-    const val KEY_PHOTO_NOISE_REDUCTION = "photo_noise_reduction"               // off/fast/hq
-    const val KEY_PHOTO_DISTORTION_CORRECTION = "photo_distortion_correction"   // hq/fast/off
-    const val KEY_PHOTO_EDGE_MODE = "photo_edge_mode"                             // off/fast/hq
+    const val KEY_PREVIEW_RESOLUTION = "preview_resolution"
+    const val KEY_PREVIEW_FPS = "preview_fps"
+
+    const val KEY_PHOTO_NOISE_REDUCTION = "photo_noise_reduction"
+    const val KEY_PHOTO_DISTORTION_CORRECTION = "photo_distortion_correction"
+    const val KEY_PHOTO_EDGE_MODE = "photo_edge_mode"
+
+    // Debugging (Advanced)
+    const val KEY_DEBUG_VIDEO_LOG_ENABLED = "debug_video_log_enabled"
+    const val KEY_DEBUG_VIDEO_LOG_FRAMES_ONLY = "debug_video_log_frames_only"
+    const val KEY_DEBUG_PHOTO_JSON_LOG_ENABLED = "debug_photo_json_log"
+    const val KEY_DEBUG_PHOTO_SYNC_TOAST = "debug_photo_sync_toast"
+    const val KEY_DEBUG_DUMP_CAMERA_INFO = "debug_dump_camera_info"
+
 
     val VIDEO_BITRATE_OPTIONS_MBPS = listOf(1, 5, 10, 20, 30, 40, 50, 75, 100, 150, 200, 250, 300)
 
@@ -137,6 +150,47 @@ object AppSettings {
             "hq" -> CaptureRequest.EDGE_MODE_HIGH_QUALITY
             else -> CaptureRequest.EDGE_MODE_OFF
         }
+    }
+
+    fun getVideoNoiseReductionMode(context: Context): Int {
+        return when (prefs(context).getString(KEY_VIDEO_NOISE_REDUCTION, "off")) {
+            "fast" -> CaptureRequest.NOISE_REDUCTION_MODE_FAST
+            "hq" -> CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY
+            else -> CaptureRequest.NOISE_REDUCTION_MODE_OFF
+        }
+    }
+
+    fun getVideoDistortionCorrectionMode(context: Context): Int {
+        // Default FAST per request.
+        return when (prefs(context).getString(KEY_VIDEO_DISTORTION_CORRECTION, "fast")) {
+            "hq" -> CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
+            "off" -> CaptureRequest.DISTORTION_CORRECTION_MODE_OFF
+            else -> CaptureRequest.DISTORTION_CORRECTION_MODE_FAST
+        }
+    }
+
+    fun getVideoEdgeMode(context: Context): Int {
+        return when (prefs(context).getString(KEY_VIDEO_EDGE_MODE, "off")) {
+            "fast" -> CaptureRequest.EDGE_MODE_FAST
+            "hq" -> CaptureRequest.EDGE_MODE_HIGH_QUALITY
+            else -> CaptureRequest.EDGE_MODE_OFF
+        }
+    }
+
+    fun getDebugVideoLogEnabled(context: Context): Boolean {
+        return prefs(context).getBoolean(KEY_DEBUG_VIDEO_LOG_ENABLED, false)
+    }
+
+    fun getDebugVideoLogFramesOnly(context: Context): Boolean {
+        return prefs(context).getBoolean(KEY_DEBUG_VIDEO_LOG_FRAMES_ONLY, false)
+    }
+
+    fun getDebugPhotoJsonLogEnabled(context: Context): Boolean {
+        return prefs(context).getBoolean(KEY_DEBUG_PHOTO_JSON_LOG_ENABLED, false)
+    }
+
+    fun getDebugPhotoSyncToastEnabled(context: Context): Boolean {
+        return prefs(context).getBoolean(KEY_DEBUG_PHOTO_SYNC_TOAST, false)
     }
 
     data class StereoCaps(
@@ -346,6 +400,31 @@ object AppSettings {
         }
         if (!sp.contains(KEY_PHOTO_EDGE_MODE)) {
             editor.putString(KEY_PHOTO_EDGE_MODE, "off"); changed = true
+        }
+
+        // Video processing defaults (recording only).
+        if (!sp.contains(KEY_VIDEO_NOISE_REDUCTION)) {
+            editor.putString(KEY_VIDEO_NOISE_REDUCTION, "off"); changed = true
+        }
+        if (!sp.contains(KEY_VIDEO_DISTORTION_CORRECTION)) {
+            editor.putString(KEY_VIDEO_DISTORTION_CORRECTION, "fast"); changed = true
+        }
+        if (!sp.contains(KEY_VIDEO_EDGE_MODE)) {
+            editor.putString(KEY_VIDEO_EDGE_MODE, "off"); changed = true
+        }
+
+        // Debugging defaults (all OFF).
+        if (!sp.contains(KEY_DEBUG_VIDEO_LOG_ENABLED)) {
+            editor.putBoolean(KEY_DEBUG_VIDEO_LOG_ENABLED, false); changed = true
+        }
+        if (!sp.contains(KEY_DEBUG_VIDEO_LOG_FRAMES_ONLY)) {
+            editor.putBoolean(KEY_DEBUG_VIDEO_LOG_FRAMES_ONLY, false); changed = true
+        }
+        if (!sp.contains(KEY_DEBUG_PHOTO_JSON_LOG_ENABLED)) {
+            editor.putBoolean(KEY_DEBUG_PHOTO_JSON_LOG_ENABLED, false); changed = true
+        }
+        if (!sp.contains(KEY_DEBUG_PHOTO_SYNC_TOAST)) {
+            editor.putBoolean(KEY_DEBUG_PHOTO_SYNC_TOAST, false); changed = true
         }
 
         if (changed) editor.apply()

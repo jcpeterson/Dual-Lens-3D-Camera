@@ -3,9 +3,11 @@ package com.example.duallens3dcamera.settings
 import android.content.SharedPreferences
 import android.os.Bundle
 import android.util.Size
+import android.widget.Toast
 import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
+import androidx.preference.SwitchPreferenceCompat
 import com.example.duallens3dcamera.R
 
 class SettingsFragment : PreferenceFragmentCompat() {
@@ -20,6 +22,8 @@ class SettingsFragment : PreferenceFragmentCompat() {
 
         setupPhotoPrefs()
         setupBitratePref()
+        setupVideoProcessingPrefs()
+        setupDebugPrefs(sp)
 
         val caps = AppSettings.loadStereoCaps(requireContext())
         if (caps == null) {
@@ -58,6 +62,73 @@ class SettingsFragment : PreferenceFragmentCompat() {
         bitrate.entries = opts.map { "${it} Mbps" }.toTypedArray()
         bitrate.entryValues = opts.map { it.toString() }.toTypedArray()
         bitrate.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+    }
+
+    private fun setupVideoProcessingPrefs() {
+        val nr = findPreference<ListPreference>(AppSettings.KEY_VIDEO_NOISE_REDUCTION)
+        val dc = findPreference<ListPreference>(AppSettings.KEY_VIDEO_DISTORTION_CORRECTION)
+        val edge = findPreference<ListPreference>(AppSettings.KEY_VIDEO_EDGE_MODE)
+
+        val entriesOffFastHq = arrayOf("Off", "Fast", "High quality")
+        val valuesOffFastHq = arrayOf("off", "fast", "hq")
+
+        nr?.entries = entriesOffFastHq
+        nr?.entryValues = valuesOffFastHq
+        nr?.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+
+        dc?.entries = arrayOf("Off", "Fast", "High quality")
+        dc?.entryValues = arrayOf("off", "fast", "hq")
+        dc?.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+
+        edge?.entries = entriesOffFastHq
+        edge?.entryValues = valuesOffFastHq
+        edge?.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+    }
+
+    private fun setupDebugPrefs(sp: SharedPreferences) {
+        val videoLogEnabled = findPreference<SwitchPreferenceCompat>(AppSettings.KEY_DEBUG_VIDEO_LOG_ENABLED)
+        val videoLogFramesOnly = findPreference<SwitchPreferenceCompat>(AppSettings.KEY_DEBUG_VIDEO_LOG_FRAMES_ONLY)
+
+        fun syncFramesOnlyEnabledState() {
+            videoLogFramesOnly?.isEnabled = (videoLogEnabled?.isChecked == true)
+        }
+
+        syncFramesOnlyEnabledState()
+        videoLogEnabled?.onPreferenceChangeListener =
+            Preference.OnPreferenceChangeListener { _, newValue ->
+                val enabled = newValue as? Boolean ?: false
+                videoLogFramesOnly?.isEnabled = enabled
+                true
+            }
+
+        val dumpPref = findPreference<Preference>(AppSettings.KEY_DEBUG_DUMP_CAMERA_INFO)
+        dumpPref?.onPreferenceClickListener = Preference.OnPreferenceClickListener {
+            val ctx = requireContext().applicationContext
+            Toast.makeText(ctx, "Writing device/camera dump…", Toast.LENGTH_SHORT).show()
+
+            Thread {
+                try {
+                    val result = DebugDump.writeOneTimeDump(ctx)
+                    activity?.runOnUiThread {
+                        Toast.makeText(
+                            ctx,
+                            "Wrote dump: ${result.displayName} (Documents)",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                } catch (e: Exception) {
+                    activity?.runOnUiThread {
+                        Toast.makeText(
+                            ctx,
+                            "Dump failed: ${e.message}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }.start()
+
+            true
+        }
     }
 
     private fun setupVideoPrefs(sp: SharedPreferences, caps: AppSettings.StereoCaps) {

@@ -8,18 +8,17 @@
         <ListPreference
             android:key="photo_noise_reduction"
             android:title="Noise reduction"
-            android:defaultValue="off"/>
+            android:defaultValue="off" />
 
         <ListPreference
             android:key="photo_distortion_correction"
             android:title="Distortion correction"
-            android:defaultValue="hq"/>
+            android:defaultValue="hq" />
 
         <ListPreference
             android:key="photo_edge_mode"
             android:title="Edge mode"
-            android:defaultValue="off"/>
-
+            android:defaultValue="off" />
     </PreferenceCategory>
 
     <PreferenceCategory
@@ -29,34 +28,83 @@
         <ListPreference
             android:key="video_resolution"
             android:title="Video resolution"
-            android:defaultValue=""/>
+            android:defaultValue="" />
 
         <ListPreference
             android:key="video_fps"
-            android:title="Video frame rate"
-            android:defaultValue="30"/>
+            android:title="Video FPS"
+            android:defaultValue="30" />
 
         <ListPreference
             android:key="video_bitrate_mbps"
             android:title="Video bitrate (Mbps)"
-            android:defaultValue="50"/>
+            android:defaultValue="50" />
 
+        <!-- (4) Optional video request processing controls -->
+        <ListPreference
+            android:key="video_noise_reduction"
+            android:title="Noise reduction (video)"
+            android:defaultValue="off" />
+
+        <ListPreference
+            android:key="video_distortion_correction"
+            android:title="Distortion correction (video)"
+            android:defaultValue="fast" />
+
+        <ListPreference
+            android:key="video_edge_mode"
+            android:title="Edge mode (video)"
+            android:defaultValue="off" />
     </PreferenceCategory>
 
     <PreferenceCategory
         android:key="preview_category"
-        android:title="Preview / viewfinder">
+        android:title="Preview settings">
 
         <ListPreference
             android:key="preview_resolution"
             android:title="Preview resolution"
-            android:defaultValue="800x600"/>
+            android:defaultValue="" />
 
         <ListPreference
             android:key="preview_fps"
-            android:title="Target frame rate"
-            android:defaultValue="30"/>
+            android:title="Preview FPS"
+            android:defaultValue="30" />
+    </PreferenceCategory>
 
+    <!-- (1)(2)(3) Debug settings -->
+    <PreferenceCategory
+        android:key="debug_category"
+        android:title="Debugging (Advanced)">
+
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="debug_video_log_enabled"
+            android:title="Stereo video JSON log"
+            android:summary="Write a JSON log per recording for sync/diagnostics"
+            android:defaultValue="false" />
+
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="debug_video_log_frames_only"
+            android:title="Video log: frames only"
+            android:summary="Only log frameNumber + sensor timestamps (smaller/faster)"
+            android:defaultValue="false" />
+
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="debug_photo_json_log"
+            android:title="Stereo photo JSON log"
+            android:summary="Write a tiny JSON log per photo for sync (sensor time + exposure per lens)"
+            android:defaultValue="false" />
+
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="debug_photo_sync_toast"
+            android:title="Photo sync toast"
+            android:summary="Show a quick Δstart/overlap toast after each photo"
+            android:defaultValue="false" />
+
+        <Preference
+            android:key="debug_dump_camera_info"
+            android:title="Dump device/camera info (one-time)"
+            android:summary="Write a JSON dump (streams, fps ranges, capabilities, etc.) to Documents" />
     </PreferenceCategory>
 
 </PreferenceScreen>

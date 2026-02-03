@@ -25,6 +25,7 @@ import com.example.duallens3dcamera.encoding.VideoEncoder
 import com.example.duallens3dcamera.media.MediaStoreUtils
 import com.example.duallens3dcamera.util.SizeSelector
 import com.example.duallens3dcamera.logging.StereoRecordingLogger
+import com.example.duallens3dcamera.logging.StereoPhotoLogger
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -90,12 +91,11 @@ class StereoCameraController(
         // Computed per device from logical CONTROL_ZOOM_RATIO_RANGE if available; else default.
         private var ultra3aFraction: Float = ULTRA_3A_FRACTION_DEFAULT
 
-        // disable ALL logging (set false to disable)
-        private const val ENABLE_STEREO_RECORDING_LOG = false
-
-        // NEW: minimal logging (frameNumber and SENSOR_TIMESTAMP only)
-        // (no exposure, no muxer info, etc.)
-        private const val STEREO_LOG_FRAMES_ONLY = false
+        // Debugging defaults (actual toggles live in Settings)
+        private const val DEFAULT_ENABLE_STEREO_RECORDING_LOG = false // disables all video logs
+        private const val DEFAULT_STEREO_LOG_FRAMES_ONLY = false // frameNumber and SENSOR_TIMESTAMP only for video logs
+        private const val DEFAULT_ENABLE_PHOTO_JSON_LOG = false
+        private const val DEFAULT_ENABLE_PHOTO_SYNC_TOAST = false
 
     }
 
@@ -175,6 +175,17 @@ class StereoCameraController(
         CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
     private var photoEdgeMode: Int = CaptureRequest.EDGE_MODE_OFF
 
+    // video processing (settings) -- applied to RECORDING only; preview is forced OFF.
+    private var videoNoiseReductionMode: Int = CaptureRequest.NOISE_REDUCTION_MODE_OFF
+    private var videoDistortionCorrectionMode: Int = CaptureRequest.DISTORTION_CORRECTION_MODE_FAST
+    private var videoEdgeMode: Int = CaptureRequest.EDGE_MODE_OFF
+
+    // Debugging (Advanced)
+    private var enableStereoRecordingLog: Boolean = DEFAULT_ENABLE_STEREO_RECORDING_LOG
+    private var stereoLogFramesOnly: Boolean = DEFAULT_STEREO_LOG_FRAMES_ONLY
+    private var enablePhotoJsonLog: Boolean = DEFAULT_ENABLE_PHOTO_JSON_LOG
+    private var enablePhotoSyncToast: Boolean = DEFAULT_ENABLE_PHOTO_SYNC_TOAST
+
 
     // Preview repeating builder for current mode.
     private var repeatingBuilder: CaptureRequest.Builder? = null
@@ -196,9 +207,12 @@ class StereoCameraController(
     // Photo capture coordination
     private data class PhotoCapture(
         val isRaw: Boolean,
+        val captureId: String,
+        val wallTimeMs: Long,
         val wideUri: Uri,
         val ultraUri: Uri,
         val sbsUri: Uri? = null,
+        val logUri: Uri? = null,
         val exifDateTimeOriginal: String,
         @Volatile var wideImage: Image? = null,
         @Volatile var ultraImage: Image? = null,
@@ -272,20 +286,36 @@ class StereoCameraController(
         videoBitrateBps: Int,
         eisEnabled: Boolean
     ) {
-        this.requestedRecordSize = requestedRecordSize
-        this.requestedRecordFps = requestedRecordFps
-        this.videoBitrateBps = videoBitrateBps
-        this.eisEnabled = eisEnabled
-
-        // If camera is running and we're idle, validate the requested size now and toast fallback if needed.
-        val handler = cameraHandler
-        if (handler != null) {
-            handler.post {
-                if (!isRecording && wideMap != null && ultraMap != null) {
-                    recomputeRecordSizeLocked()
-                }
-            }
+        cameraHandler?.post {
+            this.requestedRecordSize = requestedRecordSize
+            this.requestedRecordFps = requestedRecordFps
+            this.videoBitrateBps = videoBitrateBps
+            this.eisEnabled = eisEnabled
+//            callback.onStatus("Video config set: ${requestedRecordSize.width}x${requestedRecordSize.height} @${requestedRecordFps}fps, ${videoBitrateBps/1_000_000}Mbps, EIS=${eisEnabled}")
+            // TODO: instead of showing the user, just log it
         }
+    }
+
+    fun setVideoProcessingModes(
+        noiseReductionMode: Int,
+        distortionCorrectionMode: Int,
+        edgeMode: Int
+    ) {
+        this.videoNoiseReductionMode = noiseReductionMode
+        this.videoDistortionCorrectionMode = distortionCorrectionMode
+        this.videoEdgeMode = edgeMode
+    }
+
+    fun setDebugConfig(
+        enableStereoRecordingLog: Boolean,
+        stereoLogFramesOnly: Boolean,
+        enablePhotoJsonLog: Boolean,
+        enablePhotoSyncToast: Boolean
+    ) {
+        this.enableStereoRecordingLog = enableStereoRecordingLog
+        this.stereoLogFramesOnly = stereoLogFramesOnly
+        this.enablePhotoJsonLog = enablePhotoJsonLog
+        this.enablePhotoSyncToast = enablePhotoSyncToast
     }
 
     private fun recomputeRecordSizeLocked() {
@@ -473,13 +503,7 @@ class StereoCameraController(
 
             val wMap = wideMap
             val uMap = ultraMap
-//            if (wMap != null && uMap != null) {
-//                recomputeRecordSizeLocked()
-//                jpegWideSize = SizeSelector.chooseLargestJpegFourByThree(wMap)
-//                jpegUltraSize = SizeSelector.chooseLargestJpegFourByThree(uMap)
-//                rawWideSize = SizeSelector.chooseLargestRaw(wMap)
-//                rawUltraSize = SizeSelector.chooseLargestRaw(uMap)
-//            }
+
             if (wMap != null && uMap != null) {
                 recomputeRecordSizeLocked()
                 recomputePreviewSizeLocked()
@@ -542,11 +566,21 @@ class StereoCameraController(
                     null
                 }
 
+                val logUri = if (enablePhotoJsonLog) {
+                    val logName = "${timestampForFilename}_photo.json"
+                    MediaStoreUtils.createPendingJson(context, logName, nowMs)
+                } else {
+                    null
+                }
+
                 currentPhoto = PhotoCapture(
                     isRaw = effectiveRaw,
+                    captureId = timestampForFilename,
+                    wallTimeMs = nowMs,
                     wideUri = wideUri,
                     ultraUri = ultraUri,
                     sbsUri = sbsUri,
+                    logUri = logUri,
                     exifDateTimeOriginal = exifDt
                 )
 
@@ -628,112 +662,78 @@ class StereoCameraController(
                     iFrameIntervalSec = IFRAME_INTERVAL_SEC,
                     muxer = requireNotNull(ultraMuxer)
                 ).also { it.start() }
-//                wideEncoder = VideoEncoder(
-//                    tag = "WideVideoEncoder",
-//                    width = recordSize.width,
-//                    height = recordSize.height,
-//                    fps = TARGET_FPS,
-//                    bitrateBps = videoBitrateBps,
-//                    iFrameIntervalSec = IFRAME_INTERVAL_SEC,
-//                    muxer = requireNotNull(wideMuxer)
-//                ).also { it.start() }
-//
-//                ultraEncoder = VideoEncoder(
-//                    tag = "UltraVideoEncoder",
-//                    width = recordSize.width,
-//                    height = recordSize.height,
-//                    fps = TARGET_FPS,
-//                    bitrateBps = videoBitrateBps,
-//                    iFrameIntervalSec = IFRAME_INTERVAL_SEC,
-//                    muxer = requireNotNull(ultraMuxer)
-//                ).also { it.start() }
 
-                if (ENABLE_STEREO_RECORDING_LOG) {
-                    // for logging (create one JSON per recording)
+                if (enableStereoRecordingLog) {
+                    // for logging, use exact same timestamp used in filenames
+                    // (match wide/ultra/video/log easily)
+                    val logName = "${timestampForFilename}_record.json"
                     recordingLogUri = MediaStoreUtils.createPendingJson(
-                        context = context,
-                        displayName = "${timestampForFilename}_stereo.json",
-                        timestampMs = nowMs
+                        context,
+                        logName,
+                        nowMs
                     )
                 }
 
-                // Read logical camera metadata for timestamp source + sensor sync type
-                val logicalForLog = cameraManager.getCameraCharacteristics(logicalRearId)
+                // Create logger only if logging enabled
+                if (enableStereoRecordingLog) {
+                    val wideVideoUriLocal = requireNotNull(wideVideoUri)
+                    val ultraVideoUriLocal = requireNotNull(ultraVideoUri)
 
-                // Must pass non-null URIs to the logger
-                val wideUriForLog = requireNotNull(wideVideoUri)
-                val ultraUriForLog = requireNotNull(ultraVideoUri)
+                    val sensorTimestampSource =
+                        logicalChars?.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+                    val sensorSyncType =
+                        logicalChars?.get(CameraCharacteristics.LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE)
 
-                if (ENABLE_STEREO_RECORDING_LOG) {
-
-                    val tsSource = logicalForLog.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
-                    val syncType =
-                        logicalForLog.get(CameraCharacteristics.LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE)
-                    // Build logger (keep it alive until stopRecording writes + finalizes the JSON)
-                    val logger = StereoRecordingLogger(
+                    recordingLogger = StereoRecordingLogger(
                         recordingId = timestampForFilename,
                         logicalCameraId = logicalRearId,
                         widePhysicalId = widePhysicalId,
                         ultraPhysicalId = ultraPhysicalId,
                         recordSize = recordSize,
-//                        targetFps = TARGET_FPS,
                         targetFps = requestedRecordFps,
                         videoBitrateBps = videoBitrateBps,
                         eisEnabled = eisEnabled,
                         orientationHintDegrees = orient,
-                        sensorTimestampSource = tsSource,
-                        sensorSyncType = syncType,
-                        wideVideoUri = wideUriForLog,
-                        ultraVideoUri = ultraUriForLog,
-                        framesOnly = STEREO_LOG_FRAMES_ONLY , // minimal logging
+                        sensorTimestampSource = sensorTimestampSource,
+                        sensorSyncType = sensorSyncType,
+                        wideVideoUri = wideVideoUriLocal,
+                        ultraVideoUri = ultraVideoUriLocal,
+                        framesOnly = stereoLogFramesOnly
                     )
-                    recordingLogger = logger
+                }
 
-                    // only run encoder callback hookups in full logging mode
-                    if (!STEREO_LOG_FRAMES_ONLY ) {
+                // Connect encoders to logger
+                if (enableStereoRecordingLog) {
+                    val loggerLocal = recordingLogger
+                    val wEncLocal = wideEncoder
+                    val uEncLocal = ultraEncoder
+                    val aEncLocal = audioEncoder
 
-                        // Attach encoder callbacks using NON-NULL local references
-                        val wEncLocal = requireNotNull(wideEncoder)
-                        val uEncLocal = requireNotNull(ultraEncoder)
-                        val aEncLocal = requireNotNull(audioEncoder)
-
-                        wEncLocal.onEncodedSample =
-                            { codecPtsUs, muxerPtsUs, sizeBytes, flags, writeNs ->
-                                logger.onWideVideoSample(
-                                    codecPtsUs,
-                                    muxerPtsUs,
-                                    sizeBytes,
-                                    flags,
-                                    writeNs
-                                )
+                    if (loggerLocal != null && wEncLocal != null && uEncLocal != null && aEncLocal != null) {
+                        // Only run encoder callback hookups in full logging mode.
+                        // Frames-only mode ignores muxer/sample events entirely.
+                        if (!stereoLogFramesOnly) {
+                            wEncLocal.onEncodedSample = { codecPtsUs, muxerPtsUs, sizeBytes, flags, writeDurationNs ->
+                                loggerLocal.onWideVideoSample(codecPtsUs, muxerPtsUs, sizeBytes, flags, writeDurationNs)
                             }
-                        uEncLocal.onEncodedSample =
-                            { codecPtsUs, muxerPtsUs, sizeBytes, flags, writeNs ->
-                                logger.onUltraVideoSample(
-                                    codecPtsUs,
-                                    muxerPtsUs,
-                                    sizeBytes,
-                                    flags,
-                                    writeNs
-                                )
+                            uEncLocal.onEncodedSample = { codecPtsUs, muxerPtsUs, sizeBytes, flags, writeDurationNs ->
+                                loggerLocal.onUltraVideoSample(codecPtsUs, muxerPtsUs, sizeBytes, flags, writeDurationNs)
                             }
-                        aEncLocal.onEncodedSample =
-                            { codecPtsUs, muxerPtsUs, sizeBytes, flags, writeNs ->
-                                logger.onAudioSample(
-                                    codecPtsUs,
-                                    muxerPtsUs,
-                                    sizeBytes,
-                                    flags,
-                                    writeNs
-                                )
+                            aEncLocal.onEncodedSample = { codecPtsUs, muxerPtsUs, sizeBytes, flags, writeDurationNs ->
+                                loggerLocal.onAudioSample(codecPtsUs, muxerPtsUs, sizeBytes, flags, writeDurationNs)
                             }
-                    } else {
-                        // Make extra-sure sample logging stays off.
-                        wideEncoder?.onEncodedSample = null
-                        ultraEncoder?.onEncodedSample = null
-                        audioEncoder?.onEncodedSample = null
+                        } else {
+                            // frames-only: no-op assignments just to be explicit
+                            wEncLocal.onEncodedSample = null
+                            uEncLocal.onEncodedSample = null
+                            aEncLocal.onEncodedSample = null
+                        }
                     }
-                    // end logging setup
+                } else {
+                    // no logging; clear callbacks
+                    wideEncoder?.onEncodedSample = null
+                    ultraEncoder?.onEncodedSample = null
+                    audioEncoder?.onEncodedSample = null
                 }
 
                 createRecordingSession()
@@ -1049,8 +1049,19 @@ class StereoCameraController(
                             addTarget(preview)
                             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-                            //applyCommonNoCropNoStab(this, isVideo = false)
+
                             applyCommonNoCropNoStab(this, isVideo = false, targetFps = previewTargetFps)
+
+                            // Preview post-processing forced OFF (performance + reduce ISP variability).
+                            try { set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF) } catch (_: Exception) {}
+                            try { set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_OFF) } catch (_: Exception) {}
+                            try { set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF) } catch (_: Exception) {}
+
+                            // (Physical keys are optional; set wide as best-effort.)
+                            setPhysical(this, widePhysicalId, CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF)
+                            setPhysical(this, widePhysicalId, CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_OFF)
+                            setPhysical(this, widePhysicalId, CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
+
                             applyTorch(this)
                         }
                         repeatingBuilder = builder
@@ -1106,6 +1117,20 @@ class StereoCameraController(
 //                            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(TARGET_FPS, TARGET_FPS))
                             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+
+                            // Video post-processing (settings; default: NR OFF, Edge OFF, Distortion FAST)
+                            try { set(CaptureRequest.NOISE_REDUCTION_MODE, videoNoiseReductionMode) } catch (_: Exception) {}
+                            try { set(CaptureRequest.DISTORTION_CORRECTION_MODE, videoDistortionCorrectionMode) } catch (_: Exception) {}
+                            try { set(CaptureRequest.EDGE_MODE, videoEdgeMode) } catch (_: Exception) {}
+
+                            setPhysical(this, widePhysicalId, CaptureRequest.NOISE_REDUCTION_MODE, videoNoiseReductionMode)
+                            setPhysical(this, widePhysicalId, CaptureRequest.DISTORTION_CORRECTION_MODE, videoDistortionCorrectionMode)
+                            setPhysical(this, widePhysicalId, CaptureRequest.EDGE_MODE, videoEdgeMode)
+
+                            setPhysical(this, ultraPhysicalId, CaptureRequest.NOISE_REDUCTION_MODE, videoNoiseReductionMode)
+                            setPhysical(this, ultraPhysicalId, CaptureRequest.DISTORTION_CORRECTION_MODE, videoDistortionCorrectionMode)
+                            setPhysical(this, ultraPhysicalId, CaptureRequest.EDGE_MODE, videoEdgeMode)
+
                             applyTorch(this)
                         }
 
@@ -1113,7 +1138,7 @@ class StereoCameraController(
                         repeatingBuilder = builder
 
                         val captureCallback: CameraCaptureSession.CaptureCallback? =
-                            if (ENABLE_STEREO_RECORDING_LOG) {
+                            if (enableStereoRecordingLog) {
 
                                 val wideEncSurface = wideEnc.inputSurface
                                 val ultraEncSurface = ultraEnc.inputSurface
@@ -1253,9 +1278,6 @@ class StereoCameraController(
 
                 // attempt to lessen noise reduction
                 try { set(CaptureRequest.NOISE_REDUCTION_MODE, photoNoiseReductionMode) } catch (_: Exception) {}
-
-                try { set(CaptureRequest.EDGE_MODE, photoEdgeMode) } catch (_: Exception) {}
-
                 // NOTE: NOISE_REDUCTION_MODE_OFF looks GREAT (sharper) in good light, and even
                 //   adds a nice non-smeary texture in somewhat lower light.
                 // NOTE: NOISE_REDUCTION_MODE_MINIMAL causes crash.
@@ -1263,6 +1285,8 @@ class StereoCameraController(
                 // NOISE_REDUCTION_MODE_HIGH_QUALITY, NOISE_REDUCTION_MODE_FAST,
                 // NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG, and
                 // NOISE_REDUCTION_MODE_OFF all seem to work fine on Pixels.
+
+                try { set(CaptureRequest.EDGE_MODE, photoEdgeMode) } catch (_: Exception) {}
 
                 // START: relevant to RAW only
                 // RAW quality: request lens shading map so DngCreator can embed it (if supported).
@@ -1396,7 +1420,11 @@ class StereoCameraController(
         val ultraImg = cap.ultraImage
         val result = cap.totalResult
 
-        val ready = if (cap.isRaw) {
+        // For RAW, we always need the TotalCaptureResult to build DNG.
+        // For JPEG, we only need the TotalCaptureResult if we want exposure-time-based sync metrics
+        // (photo JSON log / photo sync toast).
+        val needResult = cap.isRaw || cap.logUri != null || enablePhotoSyncToast
+        val ready = if (needResult) {
             (wideImg != null && ultraImg != null && result != null)
         } else {
             (wideImg != null && ultraImg != null)
@@ -1411,8 +1439,43 @@ class StereoCameraController(
         val wideUri = cap.wideUri
         val ultraUri = cap.ultraUri
         val sbsUri = cap.sbsUri
+        val photoLogUri = cap.logUri
+        val captureId = cap.captureId
+        val wallTimeMs = cap.wallTimeMs
         val exifDt = cap.exifDateTimeOriginal
         val isRaw = cap.isRaw
+
+        // Photo sync metrics (for optional toast + optional per-photo JSON log)
+        val wideImageTimestampNs = wideImg?.timestamp
+        val ultraImageTimestampNs = ultraImg?.timestamp
+
+        val physicalTotalsForMetrics: Map<String, TotalCaptureResult> = try {
+            result?.physicalCameraTotalResults ?: emptyMap()
+        } catch (_: Throwable) {
+            emptyMap()
+        }
+
+        val wideResultForMetrics: CaptureResult? = physicalTotalsForMetrics[widePhysicalId] ?: result
+        val ultraResultForMetrics: CaptureResult? = physicalTotalsForMetrics[ultraPhysicalId] ?: result
+
+        val wideSensorTimestampNs = wideResultForMetrics?.get(CaptureResult.SENSOR_TIMESTAMP)
+            ?: (wideImageTimestampNs ?: 0L)
+        val ultraSensorTimestampNs = ultraResultForMetrics?.get(CaptureResult.SENSOR_TIMESTAMP)
+            ?: (ultraImageTimestampNs ?: 0L)
+
+        val wideExposureTimeNs = wideResultForMetrics?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L
+        val ultraExposureTimeNs = ultraResultForMetrics?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L
+
+        val syncMetrics = StereoPhotoLogger.computeMetrics(
+            wideSensorTimestampNs = wideSensorTimestampNs,
+            ultraSensorTimestampNs = ultraSensorTimestampNs,
+            wideExposureTimeNs = wideExposureTimeNs,
+            ultraExposureTimeNs = ultraExposureTimeNs
+        )
+
+        if (enablePhotoSyncToast) {
+            callback.onStatus(StereoPhotoLogger.formatToast(syncMetrics))
+        }
 
         // IMPORTANT: free UI immediately (saving continues in background)
         callback.onPhotoCaptureDone()
@@ -1440,6 +1503,31 @@ class StereoCameraController(
 
                     MediaStoreUtils.finalizePending(resolver, wideUri)
                     MediaStoreUtils.finalizePending(resolver, ultraUri)
+
+                    // Optional: per-photo JSON log (one per still capture)
+                    if (photoLogUri != null) {
+                        try {
+                            StereoPhotoLogger.writeJson(
+                                context = context,
+                                uri = photoLogUri,
+                                captureId = captureId,
+                                wallTimeMs = wallTimeMs,
+                                isRaw = false,
+                                widePhysicalId = widePhysicalId,
+                                ultraPhysicalId = ultraPhysicalId,
+                                wideImageUri = wideUri,
+                                ultraImageUri = ultraUri,
+                                sbsUri = sbsUri,
+                                wideImageTimestampNs = wideImageTimestampNs,
+                                ultraImageTimestampNs = ultraImageTimestampNs,
+                                metrics = syncMetrics
+                            )
+                            MediaStoreUtils.finalizePending(resolver, photoLogUri)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Photo JSON log write failed: ${e.message}", e)
+                            MediaStoreUtils.delete(resolver, photoLogUri)
+                        }
+                    }
 
                     // --- SBS output (extra) ---
                     // Run alignment + SBS JPEG encode on its own thread so it never blocks photo IO.
@@ -1478,6 +1566,7 @@ class StereoCameraController(
                     MediaStoreUtils.delete(resolver, wideUri)
                     MediaStoreUtils.delete(resolver, ultraUri)
                     sbsUri?.let { MediaStoreUtils.delete(resolver, it) }
+                    photoLogUri?.let { MediaStoreUtils.delete(resolver, it) }
                     callback.onError("JPEG save failed: ${e.message}")
                 }
             }
@@ -1503,9 +1592,6 @@ class StereoCameraController(
                     val wideTotal = physicalTotals[widePhysicalId] ?: total
                     val ultraTotal = physicalTotals[ultraPhysicalId] ?: total
 
-//                    saveDng(wideUri, wideCharacteristics, wideTotal, wideImage, exifDt)
-//                    saveDng(ultraUri, ultraCharacteristics, ultraTotal, ultraImage, exifDt)
-
                     // Write wide DNG, then close wide Image immediately.
                     try {
                         saveDng(wideUri, wideCharacteristics, wideTotal, wideImage)
@@ -1521,16 +1607,34 @@ class StereoCameraController(
                     }
                     // END: new DNG improvements
 
-//                    saveDng(wideUri, wideCharacteristics, total, wideImage, exifDt)
-//                    saveDng(ultraUri, ultraCharacteristics, total, ultraImage, exifDt)
-
                     MediaStoreUtils.finalizePending(resolver, wideUri)
                     MediaStoreUtils.finalizePending(resolver, ultraUri)
+
+                    // Optional: per-photo JSON log (one per still capture)
+                    if (photoLogUri != null) {
+                        try {
+                            StereoPhotoLogger.writeJson(
+                                context = context,
+                                uri = photoLogUri,
+                                captureId = captureId,
+                                wallTimeMs = wallTimeMs,
+                                isRaw = true,
+                                widePhysicalId = widePhysicalId,
+                                ultraPhysicalId = ultraPhysicalId,
+                                wideImageUri = wideUri,
+                                ultraImageUri = ultraUri,
+                                sbsUri = null,
+                                wideImageTimestampNs = wideImageTimestampNs,
+                                ultraImageTimestampNs = ultraImageTimestampNs,
+                                metrics = syncMetrics
+                            )
+                            MediaStoreUtils.finalizePending(resolver, photoLogUri)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Photo JSON log write failed: ${e.message}", e)
+                            MediaStoreUtils.delete(resolver, photoLogUri)
+                        }
+                    }
                 } catch (e: Exception) {
-//                    Log.e(TAG, "DNG save failed: ${e.message}", e)
-//                    MediaStoreUtils.delete(resolver, wideUri)
-//                    MediaStoreUtils.delete(resolver, ultraUri)
-//                    callback.onError("DNG save failed: ${e.message}")
                     Log.e(TAG, "DNG save failed: ${e.message}", e)
                     // Ensure images aren't leaked if an exception happens before the finally blocks above.
                     try { wideImage.close() } catch (_: Exception) {}
@@ -1538,13 +1642,9 @@ class StereoCameraController(
 
                     MediaStoreUtils.delete(resolver, wideUri)
                     MediaStoreUtils.delete(resolver, ultraUri)
+                    photoLogUri?.let { MediaStoreUtils.delete(resolver, it) }
                     callback.onError("DNG save failed: ${e.message}")
                 }
-//                } finally {
-//                    // Close RAW Images only after DngCreator has consumed them.
-//                    try { wideImage.close() } catch (_: Exception) {}
-//                    try { ultraImage.close() } catch (_: Exception) {}
-//                }
             }
         }
     }
@@ -1633,6 +1733,9 @@ class StereoCameraController(
         // so we don’t leave a dangling pending _sbs.jpg entry
         cap.sbsUri?.let { MediaStoreUtils.delete(resolver, it) }
 
+        // so we don’t leave a dangling pending _photo.json entry
+        cap.logUri?.let { MediaStoreUtils.delete(resolver, it) }
+
         callback.onPhotoCaptureDone()
     }
 
@@ -1720,40 +1823,6 @@ class StereoCameraController(
         }
     }
 
-//    private fun applyCommonNoCropNoStab(builder: CaptureRequest.Builder, isVideo: Boolean) {
-//
-//        // EIS toggle (video only)
-//        if (isVideo && eisEnabled) {
-//            builder.set(
-//                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
-//                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
-//            )
-//            builder.set(
-//                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
-//                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
-//            )
-//        } else {
-//            builder.set(
-//                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
-//                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
-//            )
-//            builder.set(
-//                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
-//                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
-//            )
-//        }
-//
-//        // Target FPS (logical + per-physical best effort)
-//        val fpsRange = Range(TARGET_FPS, TARGET_FPS)
-//        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
-//        setPhysical(builder, widePhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
-//        setPhysical(builder, ultraPhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
-//
-//        builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-//
-//        // constrain ultrawide 3A to overlap-ish center region
-//        applyUltrawide3ARegions(builder)
-//    }
     private fun chooseAeFpsRange(chars: CameraCharacteristics?, desiredFps: Int): Range<Int>? {
         val ranges = chars?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
 
