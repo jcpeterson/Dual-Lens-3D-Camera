@@ -270,231 +270,521 @@ object StereoSbs {
         return resized
     }
 
+    data class Nv21Frame(
+        val nv21: ByteArray,
+        val width: Int,
+        val height: Int,
+        val rotationDegrees: Int = 0
+    )
 
-    /**
-     * Creates an SBS JPEG.
-     *
-     * Default output (Pixel-style physical placement):
-     *   LEFT  = aligned/cropped ultrawide
-     *   RIGHT = wide (not warped/scaled/cropped)
-     *
-     * @param wideRightJpeg wide JPEG bytes (the *wide* lens image)
-     * @param ultraLeftJpeg ultrawide JPEG bytes (the *ultrawide* lens image)
-     * @param ultraInnerFractionForFeatures 0.80 => detect features only in inner 80% of ultrawide
-     * @param fallbackUltraOverlapFraction only used if ORB/RANSAC fails;
-     *        passing the logical zoom-out lower bound (e.g. ~0.5) is a decent heuristic.
-     * @param maxOutputDim cap decode size to avoid OOM on 50MP devices. Set Int.MAX_VALUE to try full res.
-     * @param featureMaxDim max dimension for feature matching working images (speed knob)
-     */
-    fun alignAndCreateSbsJpegBytes(
-        wideRightJpeg: ByteArray,
-        ultraLeftJpeg: ByteArray,
-        zoom2xEnabled: Boolean = false,
-        // 80% is important because on pixel 7, the UW is ~.7x and we need some margin
-        ultraInnerFractionForFeatures: Float = 0.80f,
-        fallbackUltraOverlapFraction: Float = 0.70f,
-        maxOutputDim: Int = 6144,
-        // featureMaxDim increases the “working resolution” for feature matching without changing
-        // the final SBS output size
-        featureMaxDim: Int = 1920, // 1280 // 1600
-        jpegQuality: Int = 100
+    fun yuvToJpegBytes(
+        frame: Nv21Frame,
+        jpegQuality: Int = 100,
+        maxOutputDim: Int = 6144
     ): ByteArray? {
         if (!ensureOpenCv()) return null
 
-        val wideExifOri = readExifOrientation(wideRightJpeg)
-        val ultraExifOri = readExifOrientation(ultraLeftJpeg)
-
-        val wideBmp = decodeJpegSafely(wideRightJpeg, maxOutputDim) ?: return null
-        val ultraBmp = decodeJpegSafely(ultraLeftJpeg, maxOutputDim) ?: run {
-            wideBmp.recycle()
-            return null
+        var bgr: Mat? = null
+        try {
+            bgr = nv21ToBgrMat(frame.nv21, frame.width, frame.height) ?: return null
+            bgr = rotateBgr(bgr!!, frame.rotationDegrees)
+            bgr = downscaleIfNeeded(bgr!!, maxOutputDim)
+            return encodeJpegBytes(bgr!!, jpegQuality)
+        } finally {
+            bgr?.release()
         }
+    }
 
-        var wideRgba: Mat? = null
-        var ultraRgba: Mat? = null
+    fun alignAndCreateSbsJpegBytes(
+        wideRight: Nv21Frame,
+        ultraLeft: Nv21Frame,
+        zoom2xEnabled: Boolean = false,
+        ultraInnerFractionForFeatures: Float = 0.80f,
+        fallbackUltraOverlapFraction: Float = 0.66f,
+        maxOutputDim: Int = 6144,
+        featureMaxDim: Int = 1600,
+        orbMaxFeatures: Int = 2000,
+        ransacReprojThreshold: Double = 3.0,
+        minInliers: Int = 35
+    ): ByteArray? {
+        if (!ensureOpenCv()) return null
+
         var wideBgr: Mat? = null
         var ultraBgr: Mat? = null
         var wideGray: Mat? = null
         var ultraGray: Mat? = null
-
-        var wideGraySmall: Mat? = null
-        var ultraGraySmall: Mat? = null
-
-        var alignedUltra: Mat? = null
+        var wideSmall: Mat? = null
+        var ultraSmall: Mat? = null
+        var affineSmall: Mat? = null
+        var affineFull: Mat? = null
+        var ultraAligned: Mat? = null
         var sbs: Mat? = null
 
-        var affineOutToRelease: Mat? = null
-
         try {
+            wideBgr = nv21ToBgrMat(wideRight.nv21, wideRight.width, wideRight.height) ?: return null
+            ultraBgr = nv21ToBgrMat(ultraLeft.nv21, ultraLeft.width, ultraLeft.height) ?: return null
 
-            // Bitmap -> Mat (RGBA)
-            wideRgba = Mat()
-            ultraRgba = Mat()
-            Utils.bitmapToMat(wideBmp, wideRgba)
-            Utils.bitmapToMat(ultraBmp, ultraRgba)
+            // Rotate to match what JPEG_ORIENTATION used to do.
+            wideBgr = rotateBgr(requireNotNull(wideBgr), wideRight.rotationDegrees)
+            ultraBgr = rotateBgr(requireNotNull(ultraBgr), ultraLeft.rotationDegrees)
 
-            // RGBA -> BGR (3ch) (less memory than 4ch)
-            wideBgr = Mat()
-            ultraBgr = Mat()
-            Imgproc.cvtColor(wideRgba, wideBgr, Imgproc.COLOR_RGBA2BGR)
-            Imgproc.cvtColor(ultraRgba, ultraBgr, Imgproc.COLOR_RGBA2BGR)
+            // Safety downscale to prevent pathological memory usage.
+            wideBgr = downscaleIfNeeded(requireNotNull(wideBgr), maxOutputDim)
+            ultraBgr = downscaleIfNeeded(requireNotNull(ultraBgr), maxOutputDim)
 
-            // Apply EXIF orientation in pixel space so SBS is upright without relying on EXIF rotation.
-            wideBgr = applyExifOrientationBgr(requireNotNull(wideBgr), wideExifOri)
-            ultraBgr = applyExifOrientationBgr(requireNotNull(ultraBgr), ultraExifOri)
-
-            // If 2x mode is enabled, emulate a 2x ultrawide by center-cropping and resizing back
-            // (keeps dimensions the same, but narrows FoV).
+            // 2x mode: crop ultrawide to central region before alignment.
+            // This narrows the UW FoV by ~2x so matching to wide2x reuses the same overlap heuristic.
             if (zoom2xEnabled) {
-                Log.i(TAG, "2x mode: pre-cropping ultrawide to 50% and resizing back before alignment")
+                Log.i(TAG, "2x mode: center-cropping ultra to simulate ~2x")
                 ultraBgr = centerCropThenResizeBackBgr(requireNotNull(ultraBgr), cropFraction = 0.50f)
             }
 
-            // BGR -> Gray for features
+            val wideW = requireNotNull(wideBgr).cols()
+            val wideH = requireNotNull(wideBgr).rows()
+            val ultraW = requireNotNull(ultraBgr).cols()
+            val ultraH = requireNotNull(ultraBgr).rows()
+
             wideGray = Mat()
             ultraGray = Mat()
-            Imgproc.cvtColor(wideBgr, wideGray, Imgproc.COLOR_BGR2GRAY)
-            Imgproc.cvtColor(ultraBgr, ultraGray, Imgproc.COLOR_BGR2GRAY)
+            Imgproc.cvtColor(requireNotNull(wideBgr), wideGray, Imgproc.COLOR_BGR2GRAY)
+            Imgproc.cvtColor(requireNotNull(ultraBgr), ultraGray, Imgproc.COLOR_BGR2GRAY)
 
-            // Optional uniform downscale for speed (same factor for both)
             val scaleForFeatures = computeUniformScaleForMaxDim(
                 maxDim = featureMaxDim,
-                w1 = wideGray.cols(),
-                h1 = wideGray.rows(),
-                w2 = ultraGray.cols(),
-                h2 = ultraGray.rows()
+                w1 = requireNotNull(wideGray).cols(),
+                h1 = requireNotNull(wideGray).rows(),
+                w2 = requireNotNull(ultraGray).cols(),
+                h2 = requireNotNull(ultraGray).rows()
             )
 
+            wideSmall = Mat()
+            ultraSmall = Mat()
             if (scaleForFeatures < 0.999) {
-                val newWideW = max(1, (wideGray.cols() * scaleForFeatures).toInt())
-                val newWideH = max(1, (wideGray.rows() * scaleForFeatures).toInt())
-                val newUltraW = max(1, (ultraGray.cols() * scaleForFeatures).toInt())
-                val newUltraH = max(1, (ultraGray.rows() * scaleForFeatures).toInt())
-
-                wideGraySmall = Mat()
-                ultraGraySmall = Mat()
-                Imgproc.resize(wideGray, wideGraySmall, CvSize(newWideW.toDouble(), newWideH.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
-                Imgproc.resize(ultraGray, ultraGraySmall, CvSize(newUltraW.toDouble(), newUltraH.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+                Imgproc.resize(
+                    requireNotNull(wideGray),
+                    wideSmall,
+                    CvSize(
+                        requireNotNull(wideGray).cols() * scaleForFeatures,
+                        requireNotNull(wideGray).rows() * scaleForFeatures
+                    ),
+                    0.0,
+                    0.0,
+                    Imgproc.INTER_AREA
+                )
+                Imgproc.resize(
+                    requireNotNull(ultraGray),
+                    ultraSmall,
+                    CvSize(
+                        requireNotNull(ultraGray).cols() * scaleForFeatures,
+                        requireNotNull(ultraGray).rows() * scaleForFeatures
+                    ),
+                    0.0,
+                    0.0,
+                    Imgproc.INTER_AREA
+                )
             } else {
-                wideGraySmall = wideGray
-                ultraGraySmall = ultraGray
+                // No downscale needed; copy so the rest of the code can assume wideSmall/ultraSmall are valid.
+                requireNotNull(wideGray).copyTo(wideSmall)
+                requireNotNull(ultraGray).copyTo(ultraSmall)
             }
 
-            val affineSmall = estimateUltraToWideAffineRansac(
-                ultraGray = requireNotNull(ultraGraySmall),
-                wideGray = requireNotNull(wideGraySmall),
-                ultraInnerFraction = ultraInnerFractionForFeatures.coerceIn(0.50f, 0.95f)
+            val expectedScale = 1.0 / fallbackUltraOverlapFraction.toDouble()
+
+            // Estimate affine in the downscaled "feature" coordinate space.
+            affineSmall = estimateUltraToWideAffineRansac(
+                ultraGray = requireNotNull(ultraSmall),
+                wideGray = requireNotNull(wideSmall),
+                ultraInnerFraction = ultraInnerFractionForFeatures,
+                nFeatures = orbMaxFeatures,
+                ransacReprojThresholdPx = ransacReprojThreshold,
+                minInliers = minInliers
             )
 
-            // Expected scale from logical zoom-out overlap fraction (ultra3aFraction).
-            val expectedScale = 1.0 / fallbackUltraOverlapFraction.coerceIn(0.20f, 0.95f).toDouble()
-
-            // Convert affine from feature-scale coords to full-res coords if needed.
-            var candidate: Mat? = if (affineSmall != null && !affineSmall.empty() && scaleForFeatures < 0.999) {
-                val a = Mat()
-                affineSmall.convertTo(a, CvType.CV_64F)
-                val m = DoubleArray(6)
-                a.get(0, 0, m)
-                m[2] /= scaleForFeatures
-                m[5] /= scaleForFeatures
-                a.put(0, 0, *m)
-                try { affineSmall.release() } catch (_: Exception) {}
-                a
-            } else {
-                affineSmall
+            // Reject obviously-bad affines before scaling up.
+            if (affineSmall != null) {
+                val ok = isAffinePlausible(
+                    affine = requireNotNull(affineSmall),
+                    ultraW = requireNotNull(ultraSmall).cols(),
+                    ultraH = requireNotNull(ultraSmall).rows(),
+                    wideW = requireNotNull(wideSmall).cols(),
+                    wideH = requireNotNull(wideSmall).rows(),
+                    expectedScale = expectedScale
+                )
+                if (!ok) {
+                    Log.w(TAG, "Rejecting implausible affine from RANSAC; will fallback")
+                    try { affineSmall?.release() } catch (_: Exception) {}
+                    affineSmall = null
+                }
             }
 
-            val wideW = wideBgr.cols()
-            val wideH = wideBgr.rows()
-            val ultraW = ultraBgr.cols()
-            val ultraH = ultraBgr.rows()
+            // Scale affine back up to full-resolution (only translation scales).
+            if (affineSmall != null) {
+                val m = DoubleArray(6)
+                requireNotNull(affineSmall).get(0, 0, m)
 
-            val affineOut: Mat = if (candidate != null && isAffinePlausible(candidate, ultraW, ultraH, wideW, wideH, expectedScale)) {
-                logAffine("accepted(candidate)", candidate)
-                storeLastGoodAffine(candidate)
-                candidate
-            } else {
-                candidate?.release()
+                val scaleBack = if (scaleForFeatures > 0.0) (1.0 / scaleForFeatures) else 1.0
 
-                // Best fallback: reuse last good affine (very stable across frames on a fixed phone).
+                affineFull = Mat(2, 3, CvType.CV_64F)
+                requireNotNull(affineFull).put(0, 0, m[0], m[1], m[2] * scaleBack)
+                requireNotNull(affineFull).put(1, 0, m[3], m[4], m[5] * scaleBack)
+
+                // Validate in full-res coordinate space too.
+                val okFull = isAffinePlausible(
+                    affine = requireNotNull(affineFull),
+                    ultraW = ultraW,
+                    ultraH = ultraH,
+                    wideW = wideW,
+                    wideH = wideH,
+                    expectedScale = expectedScale
+                )
+                if (!okFull) {
+                    Log.w(TAG, "Rejecting implausible full-res affine; will fallback")
+                    try { affineFull?.release() } catch (_: Exception) {}
+                    affineFull = null
+                }
+            }
+
+            // Fallback chain: last good affine -> centered scale heuristic
+            if (affineFull == null) {
                 val last = loadLastGoodAffine()
                 if (last != null && isAffinePlausible(last, ultraW, ultraH, wideW, wideH, expectedScale)) {
-                    Log.w(TAG, "Using lastGoodAffine fallback (current affine invalid)")
-                    logAffine("fallback(lastGood)", last)
-                    last
+                    Log.w(TAG, "Using cached lastGoodAffine fallback")
+                    affineFull = last
                 } else {
-                    last?.release()
-                    Log.w(TAG, "Using centered fallback affine (no good matches and no lastGoodAffine)")
-                    val fb = fallbackCenteredScaleAffine(
+                    try { last?.release() } catch (_: Exception) {}
+                    Log.w(TAG, "Using centered-scale fallback affine")
+                    affineFull = fallbackCenteredScaleAffine(
                         ultraWidth = ultraW,
                         ultraHeight = ultraH,
                         wideWidth = wideW,
                         wideHeight = wideH,
                         overlapFraction = fallbackUltraOverlapFraction
                     )
-                    logAffine("fallback(centered)", fb)
-                    fb
                 }
+            } else {
+                // Cache the full-res affine for next time.
+                storeLastGoodAffine(requireNotNull(affineFull))
             }
-            affineOutToRelease = affineOut
 
-            // Warp ultrawide into wide coordinates (this inherently gives the correct crop)
-            alignedUltra = Mat()
+            if (DEBUG_AFFINE_LOGS) {
+                logAffine("FINAL", requireNotNull(affineFull))
+            }
+
+            // Warp ultrawide into wide geometry.
+            ultraAligned = Mat()
             Imgproc.warpAffine(
-                ultraBgr,
-                alignedUltra,
-                affineOut,
-                CvSize(wideBgr.cols().toDouble(), wideBgr.rows().toDouble()),
+                requireNotNull(ultraBgr),
+                ultraAligned,
+                requireNotNull(affineFull),
+                CvSize(wideW.toDouble(), wideH.toDouble()),
                 Imgproc.INTER_LINEAR,
                 Core.BORDER_CONSTANT,
                 Scalar(0.0, 0.0, 0.0)
             )
-            // since we only need the affine until warpAffine() runs,
-            // we can just release right after warping
-            runCatching { affineOutToRelease.release() }
 
-            // Compose SBS: Assume LEFT = aligned ultrawide, RIGHT = wide.
-            sbs = Mat(wideH, wideW * 2, wideBgr.type())
+            // Assemble SBS: LEFT = aligned ultra, RIGHT = wide
+            sbs = Mat(wideH, wideW * 2, CvType.CV_8UC3)
+            requireNotNull(ultraAligned).copyTo(requireNotNull(sbs).submat(0, wideH, 0, wideW))
+            requireNotNull(wideBgr).copyTo(requireNotNull(sbs).submat(0, wideH, wideW, wideW * 2))
 
-            val leftRoi = sbs.submat(Rect(0, 0, wideW, wideH))
-            val rightRoi = sbs.submat(Rect(wideW, 0, wideW, wideH))
-            alignedUltra.copyTo(leftRoi)
-            wideBgr.copyTo(rightRoi)
-            leftRoi.release()
-            rightRoi.release()
-
-            // Encode SBS to JPEG @ quality=100
-            val outBytes = MatOfByte()
-            val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, jpegQuality.coerceIn(0, 100))
-            val ok = Imgcodecs.imencode(".jpg", sbs, outBytes, params)
-            if (!ok) {
-                Log.e(TAG, "Imgcodecs.imencode returned false")
-                return null
-            }
-            return outBytes.toArray()
-        } catch (oom: OutOfMemoryError) {
-            Log.e(TAG, "OOM while creating SBS (lower maxOutputDim?): ${oom.message}")
-            return null
-        } catch (t: Throwable) {
-            Log.e(TAG, "SBS creation failed: ${t.message}", t)
+            return encodeJpegBytes(requireNotNull(sbs), 100)
+        } catch (e: Exception) {
+            Log.e(TAG, "alignAndCreateSbsJpegBytes(YUV) failed: ${e.message}", e)
             return null
         } finally {
-            if (wideGraySmall !== wideGray) try { wideGraySmall?.release() } catch (_: Exception) {}
-            if (ultraGraySmall !== ultraGray) try { ultraGraySmall?.release() } catch (_: Exception) {}
-
+            try { affineSmall?.release() } catch (_: Exception) {}
+            try { affineFull?.release() } catch (_: Exception) {}
             try { wideGray?.release() } catch (_: Exception) {}
             try { ultraGray?.release() } catch (_: Exception) {}
+            try { wideSmall?.release() } catch (_: Exception) {}
+            try { ultraSmall?.release() } catch (_: Exception) {}
+            try { ultraAligned?.release() } catch (_: Exception) {}
+            try { sbs?.release() } catch (_: Exception) {}
             try { wideBgr?.release() } catch (_: Exception) {}
             try { ultraBgr?.release() } catch (_: Exception) {}
-            try { wideRgba?.release() } catch (_: Exception) {}
-            try { ultraRgba?.release() } catch (_: Exception) {}
-            try { alignedUltra?.release() } catch (_: Exception) {}
-            try { sbs?.release() } catch (_: Exception) {}
-
-            try { wideBmp.recycle() } catch (_: Exception) {}
-            try { ultraBmp.recycle() } catch (_: Exception) {}
         }
     }
+
+    private fun nv21ToBgrMat(nv21: ByteArray, width: Int, height: Int): Mat? {
+        val expected = width * height * 3 / 2
+        if (nv21.size < expected) {
+            Log.e(TAG, "NV21 too small: got=${nv21.size} expected>=$expected")
+            return null
+        }
+        val yuv = Mat(height + height / 2, width, CvType.CV_8UC1)
+        yuv.put(0, 0, nv21)
+        val bgr = Mat()
+        Imgproc.cvtColor(yuv, bgr, Imgproc.COLOR_YUV2BGR_NV21)
+        yuv.release()
+        return bgr
+    }
+
+    private fun rotateBgr(src: Mat, rotationDegrees: Int): Mat {
+        val deg = ((rotationDegrees % 360) + 360) % 360
+        if (deg == 0) return src
+        val dst = Mat()
+        when (deg) {
+            90 -> Core.rotate(src, dst, Core.ROTATE_90_CLOCKWISE)
+            180 -> Core.rotate(src, dst, Core.ROTATE_180)
+            270 -> Core.rotate(src, dst, Core.ROTATE_90_COUNTERCLOCKWISE)
+            else -> {
+                Log.w(TAG, "Unexpected rotation=$deg; leaving unrotated")
+                src.copyTo(dst)
+            }
+        }
+        src.release()
+        return dst
+    }
+
+    private fun downscaleIfNeeded(src: Mat, maxDim: Int): Mat {
+        val w = src.cols()
+        val h = src.rows()
+        val m = max(w, h)
+        if (m <= maxDim) return src
+        val scale = maxDim.toDouble() / m.toDouble()
+        val dst = Mat()
+        Imgproc.resize(src, dst, CvSize(w * scale, h * scale), 0.0, 0.0, Imgproc.INTER_AREA)
+        src.release()
+        return dst
+    }
+
+    private fun encodeJpegBytes(bgr: Mat, quality: Int): ByteArray? {
+        val out = MatOfByte()
+        val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, quality.coerceIn(0, 100))
+        return try {
+            val ok = Imgcodecs.imencode(".jpg", bgr, out, params)
+            if (!ok) null else out.toArray()
+        } finally {
+            params.release()
+            out.release()
+        }
+    }
+
+    // FROM WHEN DUAL JPG CAPTURE WAS USED
+//    /**
+//     * Creates an SBS JPEG.
+//     *
+//     * Default output (Pixel-style physical placement):
+//     *   LEFT  = aligned/cropped ultrawide
+//     *   RIGHT = wide (not warped/scaled/cropped)
+//     *
+//     * @param wideRightJpeg wide JPEG bytes (the *wide* lens image)
+//     * @param ultraLeftJpeg ultrawide JPEG bytes (the *ultrawide* lens image)
+//     * @param ultraInnerFractionForFeatures 0.80 => detect features only in inner 80% of ultrawide
+//     * @param fallbackUltraOverlapFraction only used if ORB/RANSAC fails;
+//     *        passing the logical zoom-out lower bound (e.g. ~0.5) is a decent heuristic.
+//     * @param maxOutputDim cap decode size to avoid OOM on 50MP devices. Set Int.MAX_VALUE to try full res.
+//     * @param featureMaxDim max dimension for feature matching working images (speed knob)
+//     */
+//    fun alignAndCreateSbsJpegBytes(
+//        wideRightJpeg: ByteArray,
+//        ultraLeftJpeg: ByteArray,
+//        zoom2xEnabled: Boolean = false,
+//        // 80% is important because on pixel 7, the UW is ~.7x and we need some margin
+//        ultraInnerFractionForFeatures: Float = 0.80f,
+//        fallbackUltraOverlapFraction: Float = 0.70f,
+//        maxOutputDim: Int = 6144,
+//        // featureMaxDim increases the “working resolution” for feature matching without changing
+//        // the final SBS output size
+//        featureMaxDim: Int = 1920, // 1280 // 1600
+//        jpegQuality: Int = 100
+//    ): ByteArray? {
+//        if (!ensureOpenCv()) return null
+//
+//        val wideExifOri = readExifOrientation(wideRightJpeg)
+//        val ultraExifOri = readExifOrientation(ultraLeftJpeg)
+//
+//        val wideBmp = decodeJpegSafely(wideRightJpeg, maxOutputDim) ?: return null
+//        val ultraBmp = decodeJpegSafely(ultraLeftJpeg, maxOutputDim) ?: run {
+//            wideBmp.recycle()
+//            return null
+//        }
+//
+//        var wideRgba: Mat? = null
+//        var ultraRgba: Mat? = null
+//        var wideBgr: Mat? = null
+//        var ultraBgr: Mat? = null
+//        var wideGray: Mat? = null
+//        var ultraGray: Mat? = null
+//
+//        var wideGraySmall: Mat? = null
+//        var ultraGraySmall: Mat? = null
+//
+//        var alignedUltra: Mat? = null
+//        var sbs: Mat? = null
+//
+//        var affineOutToRelease: Mat? = null
+//
+//        try {
+//
+//            // Bitmap -> Mat (RGBA)
+//            wideRgba = Mat()
+//            ultraRgba = Mat()
+//            Utils.bitmapToMat(wideBmp, wideRgba)
+//            Utils.bitmapToMat(ultraBmp, ultraRgba)
+//
+//            // RGBA -> BGR (3ch) (less memory than 4ch)
+//            wideBgr = Mat()
+//            ultraBgr = Mat()
+//            Imgproc.cvtColor(wideRgba, wideBgr, Imgproc.COLOR_RGBA2BGR)
+//            Imgproc.cvtColor(ultraRgba, ultraBgr, Imgproc.COLOR_RGBA2BGR)
+//
+//            // Apply EXIF orientation in pixel space so SBS is upright without relying on EXIF rotation.
+//            wideBgr = applyExifOrientationBgr(requireNotNull(wideBgr), wideExifOri)
+//            ultraBgr = applyExifOrientationBgr(requireNotNull(ultraBgr), ultraExifOri)
+//
+//            // If 2x mode is enabled, emulate a 2x ultrawide by center-cropping and resizing back
+//            // (keeps dimensions the same, but narrows FoV).
+//            if (zoom2xEnabled) {
+//                Log.i(TAG, "2x mode: pre-cropping ultrawide to 50% and resizing back before alignment")
+//                ultraBgr = centerCropThenResizeBackBgr(requireNotNull(ultraBgr), cropFraction = 0.50f)
+//            }
+//
+//            // BGR -> Gray for features
+//            wideGray = Mat()
+//            ultraGray = Mat()
+//            Imgproc.cvtColor(wideBgr, wideGray, Imgproc.COLOR_BGR2GRAY)
+//            Imgproc.cvtColor(ultraBgr, ultraGray, Imgproc.COLOR_BGR2GRAY)
+//
+//            // Optional uniform downscale for speed (same factor for both)
+//            val scaleForFeatures = computeUniformScaleForMaxDim(
+//                maxDim = featureMaxDim,
+//                w1 = wideGray.cols(),
+//                h1 = wideGray.rows(),
+//                w2 = ultraGray.cols(),
+//                h2 = ultraGray.rows()
+//            )
+//
+//            if (scaleForFeatures < 0.999) {
+//                val newWideW = max(1, (wideGray.cols() * scaleForFeatures).toInt())
+//                val newWideH = max(1, (wideGray.rows() * scaleForFeatures).toInt())
+//                val newUltraW = max(1, (ultraGray.cols() * scaleForFeatures).toInt())
+//                val newUltraH = max(1, (ultraGray.rows() * scaleForFeatures).toInt())
+//
+//                wideGraySmall = Mat()
+//                ultraGraySmall = Mat()
+//                Imgproc.resize(wideGray, wideGraySmall, CvSize(newWideW.toDouble(), newWideH.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+//                Imgproc.resize(ultraGray, ultraGraySmall, CvSize(newUltraW.toDouble(), newUltraH.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+//            } else {
+//                wideGraySmall = wideGray
+//                ultraGraySmall = ultraGray
+//            }
+//
+//            val affineSmall = estimateUltraToWideAffineRansac(
+//                ultraGray = requireNotNull(ultraGraySmall),
+//                wideGray = requireNotNull(wideGraySmall),
+//                ultraInnerFraction = ultraInnerFractionForFeatures.coerceIn(0.50f, 0.95f)
+//            )
+//
+//            // Expected scale from logical zoom-out overlap fraction (ultra3aFraction).
+//            val expectedScale = 1.0 / fallbackUltraOverlapFraction.coerceIn(0.20f, 0.95f).toDouble()
+//
+//            // Convert affine from feature-scale coords to full-res coords if needed.
+//            var candidate: Mat? = if (affineSmall != null && !affineSmall.empty() && scaleForFeatures < 0.999) {
+//                val a = Mat()
+//                affineSmall.convertTo(a, CvType.CV_64F)
+//                val m = DoubleArray(6)
+//                a.get(0, 0, m)
+//                m[2] /= scaleForFeatures
+//                m[5] /= scaleForFeatures
+//                a.put(0, 0, *m)
+//                try { affineSmall.release() } catch (_: Exception) {}
+//                a
+//            } else {
+//                affineSmall
+//            }
+//
+//            val wideW = wideBgr.cols()
+//            val wideH = wideBgr.rows()
+//            val ultraW = ultraBgr.cols()
+//            val ultraH = ultraBgr.rows()
+//
+//            val affineOut: Mat = if (candidate != null && isAffinePlausible(candidate, ultraW, ultraH, wideW, wideH, expectedScale)) {
+//                logAffine("accepted(candidate)", candidate)
+//                storeLastGoodAffine(candidate)
+//                candidate
+//            } else {
+//                candidate?.release()
+//
+//                // Best fallback: reuse last good affine (very stable across frames on a fixed phone).
+//                val last = loadLastGoodAffine()
+//                if (last != null && isAffinePlausible(last, ultraW, ultraH, wideW, wideH, expectedScale)) {
+//                    Log.w(TAG, "Using lastGoodAffine fallback (current affine invalid)")
+//                    logAffine("fallback(lastGood)", last)
+//                    last
+//                } else {
+//                    last?.release()
+//                    Log.w(TAG, "Using centered fallback affine (no good matches and no lastGoodAffine)")
+//                    val fb = fallbackCenteredScaleAffine(
+//                        ultraWidth = ultraW,
+//                        ultraHeight = ultraH,
+//                        wideWidth = wideW,
+//                        wideHeight = wideH,
+//                        overlapFraction = fallbackUltraOverlapFraction
+//                    )
+//                    logAffine("fallback(centered)", fb)
+//                    fb
+//                }
+//            }
+//            affineOutToRelease = affineOut
+//
+//            // Warp ultrawide into wide coordinates (this inherently gives the correct crop)
+//            alignedUltra = Mat()
+//            Imgproc.warpAffine(
+//                ultraBgr,
+//                alignedUltra,
+//                affineOut,
+//                CvSize(wideBgr.cols().toDouble(), wideBgr.rows().toDouble()),
+//                Imgproc.INTER_LINEAR,
+//                Core.BORDER_CONSTANT,
+//                Scalar(0.0, 0.0, 0.0)
+//            )
+//            // since we only need the affine until warpAffine() runs,
+//            // we can just release right after warping
+//            runCatching { affineOutToRelease.release() }
+//
+//            // Compose SBS: Assume LEFT = aligned ultrawide, RIGHT = wide.
+//            sbs = Mat(wideH, wideW * 2, wideBgr.type())
+//
+//            val leftRoi = sbs.submat(Rect(0, 0, wideW, wideH))
+//            val rightRoi = sbs.submat(Rect(wideW, 0, wideW, wideH))
+//            alignedUltra.copyTo(leftRoi)
+//            wideBgr.copyTo(rightRoi)
+//            leftRoi.release()
+//            rightRoi.release()
+//
+//            // Encode SBS to JPEG @ quality=100
+//            val outBytes = MatOfByte()
+//            val params = MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, jpegQuality.coerceIn(0, 100))
+//            val ok = Imgcodecs.imencode(".jpg", sbs, outBytes, params)
+//            if (!ok) {
+//                Log.e(TAG, "Imgcodecs.imencode returned false")
+//                return null
+//            }
+//            return outBytes.toArray()
+//        } catch (oom: OutOfMemoryError) {
+//            Log.e(TAG, "OOM while creating SBS (lower maxOutputDim?): ${oom.message}")
+//            return null
+//        } catch (t: Throwable) {
+//            Log.e(TAG, "SBS creation failed: ${t.message}", t)
+//            return null
+//        } finally {
+//            if (wideGraySmall !== wideGray) try { wideGraySmall?.release() } catch (_: Exception) {}
+//            if (ultraGraySmall !== ultraGray) try { ultraGraySmall?.release() } catch (_: Exception) {}
+//
+//            try { wideGray?.release() } catch (_: Exception) {}
+//            try { ultraGray?.release() } catch (_: Exception) {}
+//            try { wideBgr?.release() } catch (_: Exception) {}
+//            try { ultraBgr?.release() } catch (_: Exception) {}
+//            try { wideRgba?.release() } catch (_: Exception) {}
+//            try { ultraRgba?.release() } catch (_: Exception) {}
+//            try { alignedUltra?.release() } catch (_: Exception) {}
+//            try { sbs?.release() } catch (_: Exception) {}
+//
+//            try { wideBmp.recycle() } catch (_: Exception) {}
+//            try { ultraBmp.recycle() } catch (_: Exception) {}
+//        }
+//    }
 
     // -------------------- Alignment internals --------------------
 
@@ -511,7 +801,8 @@ object StereoSbs {
         ransacReprojThresholdPx: Double = 2.0, // 3.0 // if decreasing, increase maxIters too
         maxIters: Long = 3000, // 2000
         confidence: Double = 0.99,
-        refineIters: Long = 20 // 10
+        refineIters: Long = 20, // 10
+        minInliers: Int = 35
     ): Mat? {
         val orb = ORB.create(nFeatures)
 
@@ -523,7 +814,13 @@ object StereoSbs {
         val y0 = marginY
         val x1 = (ultraGray.cols() - marginX - 1).coerceAtLeast(x0 + 1)
         val y1 = (ultraGray.rows() - marginY - 1).coerceAtLeast(y0 + 1)
-        Imgproc.rectangle(mask, Point(x0.toDouble(), y0.toDouble()), Point(x1.toDouble(), y1.toDouble()), Scalar(255.0), -1)
+        Imgproc.rectangle(
+            mask,
+            Point(x0.toDouble(), y0.toDouble()),
+            Point(x1.toDouble(), y1.toDouble()),
+            Scalar(255.0),
+            -1
+        )
 
         val kpUltra = MatOfKeyPoint()
         val kpWide = MatOfKeyPoint()
@@ -553,7 +850,7 @@ object StereoSbs {
             if (good.size < 8) return null
 
             good.sortBy { it.distance }
-            val capped = good.take(min(good.size, 250))
+            val capped = good.take(kotlin.math.min(good.size, 250))
 
             val ultraPts = ArrayList<Point>(capped.size)
             val widePts = ArrayList<Point>(capped.size)
@@ -582,8 +879,7 @@ object StereoSbs {
             )
 
             val inlierCount = try { Core.countNonZero(inliers) } catch (_: Exception) { -1 }
-//            if (affine.empty() || inlierCount in 0..5) return null // too permissive
-            if (affine.empty() || inlierCount < 12) return null // less permissive
+            if (affine.empty() || inlierCount < minInliers) return null
 
             return affine
         } finally {

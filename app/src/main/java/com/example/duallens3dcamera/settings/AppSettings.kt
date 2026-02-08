@@ -42,6 +42,9 @@ object AppSettings {
     const val KEY_PHOTO_NOISE_REDUCTION = "photo_noise_reduction"
     const val KEY_PHOTO_DISTORTION_CORRECTION = "photo_distortion_correction"
     const val KEY_PHOTO_EDGE_MODE = "photo_edge_mode"
+    // Whether or not to save the two images separately on top of the sbs output
+    // Note: Applies in JPG mode only (RAW mode always provides two dng files and not sbs)
+    const val KEY_PHOTO_SAVE_INDIVIDUAL_IMAGES = "photo_save_individual_images"
 
     // Debugging (Advanced)
     const val KEY_DEBUG_VIDEO_LOG_ENABLED = "debug_video_log_enabled"
@@ -151,6 +154,9 @@ object AppSettings {
             else -> CaptureRequest.EDGE_MODE_OFF
         }
     }
+
+    fun getPhotoSaveIndividualImages(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_PHOTO_SAVE_INDIVIDUAL_IMAGES, false)
 
     fun getVideoNoiseReductionMode(context: Context): Int {
         return when (prefs(context).getString(KEY_VIDEO_NOISE_REDUCTION, "off")) {
@@ -400,6 +406,10 @@ object AppSettings {
         }
         if (!sp.contains(KEY_PHOTO_EDGE_MODE)) {
             editor.putString(KEY_PHOTO_EDGE_MODE, "off"); changed = true
+        }
+        // default: in JPG mode, output only SBS, no individual images
+        if (!sp.contains(KEY_PHOTO_SAVE_INDIVIDUAL_IMAGES)) {
+            editor.putBoolean(KEY_PHOTO_SAVE_INDIVIDUAL_IMAGES, false); changed = true
         }
 
         // Video processing defaults (recording only).

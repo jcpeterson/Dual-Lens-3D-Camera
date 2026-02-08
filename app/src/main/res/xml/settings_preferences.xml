@@ -19,6 +19,12 @@
             android:key="photo_edge_mode"
             android:title="Edge mode"
             android:defaultValue="off" />
+
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="photo_save_individual_images"
+            android:title="Save individual wide/ultrawide photos"
+            android:summary="When off, only the *_sbs.jpg file is written (recommended)"
+            android:defaultValue="false" />
     </PreferenceCategory>
 
     <PreferenceCategory

@@ -81,8 +81,10 @@ class StereoCameraController(
         private const val AUDIO_CHANNELS = 1
         private const val AUDIO_BITRATE_BPS = 128_000
 
-        // maxes for spamming the shutter button
-        private const val JPEG_MAX_IMAGES = 8
+        // ImageReader queue depth for still capture.
+        // YUV frames are large (uncompressed), so keep this modest to avoid OOM when spamming.
+        // Limit used to be 8 for jpg, but YUV is larger
+        private const val YUV_MAX_IMAGES = 4
         private const val RAW_MAX_IMAGES = 3
 
         // Restrict ultrawide AE/AF/AWB decisions to the central 70% of its FoV (trim 30% total).
@@ -149,8 +151,8 @@ class StereoCameraController(
     // Default fallback (overridden by settings)
     private var previewSize: Size = Size(800, 600)
 
-    private var jpegWideSize: Size = PREFERRED_RECORD_SIZE
-    private var jpegUltraSize: Size = PREFERRED_RECORD_SIZE
+    private var yuvWideSize: Size = PREFERRED_RECORD_SIZE
+    private var yuvUltraSize: Size = PREFERRED_RECORD_SIZE
 
     private var rawWideSize: Size? = null
     private var rawUltraSize: Size? = null
@@ -186,6 +188,8 @@ class StereoCameraController(
     private var enablePhotoJsonLog: Boolean = DEFAULT_ENABLE_PHOTO_JSON_LOG
     private var enablePhotoSyncToast: Boolean = DEFAULT_ENABLE_PHOTO_SYNC_TOAST
 
+    @Volatile private var saveIndividualLensImages: Boolean = false
+
 
     // Preview repeating builder for current mode.
     private var repeatingBuilder: CaptureRequest.Builder? = null
@@ -209,11 +213,12 @@ class StereoCameraController(
         val isRaw: Boolean,
         val captureId: String,
         val wallTimeMs: Long,
-        val wideUri: Uri,
-        val ultraUri: Uri,
+        val wideUri: Uri?,
+        val ultraUri: Uri?,
         val sbsUri: Uri? = null,
         val logUri: Uri? = null,
         val exifDateTimeOriginal: String,
+        val rotationDegrees: Int,
         @Volatile var wideImage: Image? = null,
         @Volatile var ultraImage: Image? = null,
         @Volatile var totalResult: TotalCaptureResult? = null,
@@ -316,6 +321,10 @@ class StereoCameraController(
         this.stereoLogFramesOnly = stereoLogFramesOnly
         this.enablePhotoJsonLog = enablePhotoJsonLog
         this.enablePhotoSyncToast = enablePhotoSyncToast
+    }
+
+    fun setPhotoSaveIndividualLensImages(enabled: Boolean) {
+        this.saveIndividualLensImages = enabled
     }
 
     private fun recomputeRecordSizeLocked() {
@@ -507,8 +516,8 @@ class StereoCameraController(
             if (wMap != null && uMap != null) {
                 recomputeRecordSizeLocked()
                 recomputePreviewSizeLocked()
-                jpegWideSize = SizeSelector.chooseLargestJpegFourByThree(wMap)
-                jpegUltraSize = SizeSelector.chooseLargestJpegFourByThree(uMap)
+                yuvWideSize = SizeSelector.chooseLargestYuvFourByThree(wMap)
+                yuvUltraSize = SizeSelector.chooseLargestYuvFourByThree(uMap)
                 rawWideSize = SizeSelector.chooseLargestRaw(wMap)
                 rawUltraSize = SizeSelector.chooseLargestRaw(uMap)
             }
@@ -540,7 +549,7 @@ class StereoCameraController(
             // don't allow RAW on Samsung
             val effectiveRaw = raw && phoneIsAPixel
             if (raw && !phoneIsAPixel) {
-                callback.onStatus("RAW/DNG is Pixel-only for now (Samsung uses JPG).")
+                callback.onStatus("RAW is Pixel-only for now (Samsung uses YUV).")
             }
             if (effectiveRaw != isRawMode) {
                 isRawMode = effectiveRaw
@@ -549,29 +558,33 @@ class StereoCameraController(
 
             val nowMs = System.currentTimeMillis()
             val exifDt = exifDateTimeOriginal(nowMs)
+            val rotationDegrees = computeJpegOrientation()
 
             try {
+                val saveIndividuals = saveIndividualLensImages || effectiveRaw
+
                 val wideName = if (effectiveRaw) "${timestampForFilename}_wide.dng" else "${timestampForFilename}_wide.jpg"
                 val ultraName = if (effectiveRaw) "${timestampForFilename}_ultrawide.dng" else "${timestampForFilename}_ultrawide.jpg"
                 val wideMime = if (effectiveRaw) "image/x-adobe-dng" else "image/jpeg"
                 val ultraMime = if (effectiveRaw) "image/x-adobe-dng" else "image/jpeg"
 
-                val wideUri = MediaStoreUtils.createPendingImage(context, wideName, wideMime, nowMs)
-                val ultraUri = MediaStoreUtils.createPendingImage(context, ultraName, ultraMime, nowMs)
+                val wideUri: Uri? = if (saveIndividuals) {
+                    MediaStoreUtils.createPendingImage(context, wideName, wideMime, nowMs)
+                } else null
+
+                val ultraUri: Uri? = if (saveIndividuals) {
+                    MediaStoreUtils.createPendingImage(context, ultraName, ultraMime, nowMs)
+                } else null
 
                 val sbsUri = if (!effectiveRaw) {
                     val sbsName = "${timestampForFilename}_sbs.jpg"
                     MediaStoreUtils.createPendingImage(context, sbsName, "image/jpeg", nowMs)
-                } else {
-                    null
-                }
+                } else null
 
                 val logUri = if (enablePhotoJsonLog) {
                     val logName = "${timestampForFilename}_photo.json"
                     MediaStoreUtils.createPendingJson(context, logName, nowMs)
-                } else {
-                    null
-                }
+                } else null
 
                 currentPhoto = PhotoCapture(
                     isRaw = effectiveRaw,
@@ -581,7 +594,8 @@ class StereoCameraController(
                     ultraUri = ultraUri,
                     sbsUri = sbsUri,
                     logUri = logUri,
-                    exifDateTimeOriginal = exifDt
+                    exifDateTimeOriginal = exifDt,
+                    rotationDegrees = rotationDegrees
                 )
 
                 doStillCapture(effectiveRaw)
@@ -942,13 +956,13 @@ class StereoCameraController(
         recomputeRecordSizeLocked()
         recomputePreviewSizeLocked()
 
-        jpegWideSize = SizeSelector.chooseLargestJpegFourByThree(wMap)
-        jpegUltraSize = SizeSelector.chooseLargestJpegFourByThree(uMap)
-
-        Log.i(TAG, "JPEG wide=${jpegWideSize.width}x${jpegWideSize.height}, ultra=${jpegUltraSize.width}x${jpegUltraSize.height}")
+        yuvWideSize = SizeSelector.chooseLargestYuvFourByThree(wMap)
+        yuvUltraSize = SizeSelector.chooseLargestYuvFourByThree(uMap)
+        Log.i(TAG, "YUV wide=${yuvWideSize}, ultra=${yuvUltraSize}")
 
         rawWideSize = SizeSelector.chooseLargestRaw(wMap)
         rawUltraSize = SizeSelector.chooseLargestRaw(uMap)
+        Log.i(TAG, "RAW wide=${rawWideSize}, ultra=${rawUltraSize}")
 
     }
 
@@ -996,14 +1010,9 @@ class StereoCameraController(
 
         closeReaders()
 
-//        val raw = isRawMode
-
-        // Samsung hack version
-        // raw doesn't work with samsung yet, so disable
         val raw = if (!phoneIsAPixel && isRawMode) {
-            // Samsung: RAW/DNG stereo is unstable on some devices (can hard-crash/reboot).
+            callback.onStatus("RAW/DNG disabled on Samsung for now (YUV only).")
             isRawMode = false
-            callback.onStatus("RAW/DNG disabled on Samsung for now (JPG only).")
             false
         } else {
             isRawMode
@@ -1012,18 +1021,18 @@ class StereoCameraController(
         val (format, wideSize, ultraSize) = if (raw) {
             val w = rawWideSize
             val u = rawUltraSize
-            if (w == null || u == null) {
-                callback.onStatus("RAW not supported; using JPG.")
-                isRawMode = false
-                Triple(ImageFormat.JPEG, jpegWideSize, jpegUltraSize)
-            } else {
+            if (w != null && u != null) {
                 Triple(ImageFormat.RAW_SENSOR, w, u)
+            } else {
+                callback.onStatus("RAW not supported; using YUV.")
+                isRawMode = false
+                Triple(ImageFormat.YUV_420_888, yuvWideSize, yuvUltraSize)
             }
         } else {
-            Triple(ImageFormat.JPEG, jpegWideSize, jpegUltraSize)
+            Triple(ImageFormat.YUV_420_888, yuvWideSize, yuvUltraSize)
         }
 
-        val maxImages = if (format == ImageFormat.RAW_SENSOR) RAW_MAX_IMAGES else JPEG_MAX_IMAGES
+        val maxImages = if (format == ImageFormat.RAW_SENSOR) RAW_MAX_IMAGES else YUV_MAX_IMAGES
 
         wideReader = ImageReader.newInstance(wideSize.width, wideSize.height, format, maxImages).apply {
             setOnImageAvailableListener({ reader -> onStillImageAvailable(isWide = true, reader = reader) }, handler)
@@ -1245,7 +1254,7 @@ class StereoCameraController(
             return
         }
 
-        val jpegOrientation = computeJpegOrientation()
+//        val jpegOrientation = computeJpegOrientation()
         val samsungMode = !phoneIsAPixel
         val preview = previewSurface
 
@@ -1322,10 +1331,6 @@ class StereoCameraController(
                 applyCommonNoCropNoStab(this, isVideo = false, targetFps = previewTargetFps)
                 applyTorch(this)
 
-                if (!raw) {
-                    set(CaptureRequest.JPEG_QUALITY, 100.toByte())
-                    set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
-                }
             }
 
             sess.capture(
@@ -1416,21 +1421,25 @@ class StereoCameraController(
         val cap = currentPhoto ?: return
         if (cap.finished) return
 
-        val wideImg = cap.wideImage
-        val ultraImg = cap.ultraImage
-        val result = cap.totalResult
+        val wideImgNullable = cap.wideImage
+        val ultraImgNullable = cap.ultraImage
+        val totalResultNullable = cap.totalResult
 
         // For RAW, we always need the TotalCaptureResult to build DNG.
-        // For JPEG, we only need the TotalCaptureResult if we want exposure-time-based sync metrics
+        // For YUV, we only need the TotalCaptureResult if we want exposure-time-based sync metrics
         // (photo JSON log / photo sync toast).
         val needResult = cap.isRaw || cap.logUri != null || enablePhotoSyncToast
         val ready = if (needResult) {
-            (wideImg != null && ultraImg != null && result != null)
+            (wideImgNullable != null && ultraImgNullable != null && totalResultNullable != null)
         } else {
-            (wideImg != null && ultraImg != null)
+            (wideImgNullable != null && ultraImgNullable != null)
         }
 
         if (!ready) return
+
+        // Non-null locals now that we're ready.
+        val wideImg = requireNotNull(wideImgNullable)
+        val ultraImg = requireNotNull(ultraImgNullable)
 
         // Detach this capture so UI/camera can proceed immediately.
         cap.finished = true
@@ -1440,23 +1449,25 @@ class StereoCameraController(
         val ultraUri = cap.ultraUri
         val sbsUri = cap.sbsUri
         val photoLogUri = cap.logUri
+
         val captureId = cap.captureId
         val wallTimeMs = cap.wallTimeMs
         val exifDt = cap.exifDateTimeOriginal
         val isRaw = cap.isRaw
+        val rotationDegrees = cap.rotationDegrees
 
         // Photo sync metrics (for optional toast + optional per-photo JSON log)
-        val wideImageTimestampNs = wideImg?.timestamp
-        val ultraImageTimestampNs = ultraImg?.timestamp
+        val wideImageTimestampNs: Long? = try { wideImg.timestamp } catch (_: Exception) { null }
+        val ultraImageTimestampNs: Long? = try { ultraImg.timestamp } catch (_: Exception) { null }
 
-        val physicalTotalsForMetrics: Map<String, TotalCaptureResult> = try {
-            result?.physicalCameraTotalResults ?: emptyMap()
+        val physicalForMetrics: Map<String, CaptureResult> = try {
+            totalResultNullable?.physicalCameraResults ?: emptyMap()
         } catch (_: Throwable) {
             emptyMap()
         }
 
-        val wideResultForMetrics: CaptureResult? = physicalTotalsForMetrics[widePhysicalId] ?: result
-        val ultraResultForMetrics: CaptureResult? = physicalTotalsForMetrics[ultraPhysicalId] ?: result
+        val wideResultForMetrics: CaptureResult? = physicalForMetrics[widePhysicalId] ?: totalResultNullable
+        val ultraResultForMetrics: CaptureResult? = physicalForMetrics[ultraPhysicalId] ?: totalResultNullable
 
         val wideSensorTimestampNs = wideResultForMetrics?.get(CaptureResult.SENSOR_TIMESTAMP)
             ?: (wideImageTimestampNs ?: 0L)
@@ -1483,165 +1494,196 @@ class StereoCameraController(
         val resolver = context.contentResolver
 
         if (!isRaw) {
-            // --- JPEG path: copy bytes now, close Images NOW (frees buffers) ---
-            val wideBytes = try {
-                imageToBytes(requireNotNull(wideImg))
-            } finally {
-                try { wideImg?.close() } catch (_: Exception) {}
+            // --- YUV path ---
+            // Convert to NV21 right away so we can close the ImageReader buffers quickly.
+            val wideW = wideImg.width
+            val wideH = wideImg.height
+            val ultraW = ultraImg.width
+            val ultraH = ultraImg.height
+
+            val wideNv21 = try { yuv420ToNv21(wideImg) } finally {
+                try { wideImg.close() } catch (_: Exception) {}
+            }
+            val ultraNv21 = try { yuv420ToNv21(ultraImg) } finally {
+                try { ultraImg.close() } catch (_: Exception) {}
             }
 
-            val ultraBytes = try {
-                imageToBytes(requireNotNull(ultraImg))
-            } finally {
-                try { ultraImg?.close() } catch (_: Exception) {}
-            }
+            val wideFrame = StereoSbs.Nv21Frame(
+                nv21 = wideNv21,
+                width = wideW,
+                height = wideH,
+                rotationDegrees = rotationDegrees
+            )
+            val ultraFrame = StereoSbs.Nv21Frame(
+                nv21 = ultraNv21,
+                width = ultraW,
+                height = ultraH,
+                rotationDegrees = rotationDegrees
+            )
 
-            ioExecutor.execute {
-                try {
-                    saveJpegBytes(wideUri, wideBytes, exifDt)
-                    saveJpegBytes(ultraUri, ultraBytes, exifDt)
+            // Optional individual lens outputs (OFF by default)
+            if (wideUri != null && ultraUri != null) {
+                val wideOutUri = wideUri
+                val ultraOutUri = ultraUri
+                val logOutUri: Uri? = photoLogUri
 
-                    MediaStoreUtils.finalizePending(resolver, wideUri)
-                    MediaStoreUtils.finalizePending(resolver, ultraUri)
+                ioExecutor.execute {
+                    try {
+                        val wideJpeg = StereoSbs.yuvToJpegBytes(wideFrame, jpegQuality = 100)
+                            ?: throw IllegalStateException("Wide YUV->JPEG encode failed")
+                        val ultraJpeg = StereoSbs.yuvToJpegBytes(ultraFrame, jpegQuality = 100)
+                            ?: throw IllegalStateException("Ultra YUV->JPEG encode failed")
 
-                    // Optional: per-photo JSON log (one per still capture)
-                    if (photoLogUri != null) {
-                        try {
+                        saveJpegBytes(wideOutUri, wideJpeg, exifDt, orientation = PlatformExif.ORIENTATION_NORMAL)
+                        saveJpegBytes(ultraOutUri, ultraJpeg, exifDt, orientation = PlatformExif.ORIENTATION_NORMAL)
+                        MediaStoreUtils.finalizePending(resolver, wideOutUri)
+                        MediaStoreUtils.finalizePending(resolver, ultraOutUri)
+
+                        if (logOutUri != null) {
                             StereoPhotoLogger.writeJson(
                                 context = context,
-                                uri = photoLogUri,
+                                uri = logOutUri,
                                 captureId = captureId,
                                 wallTimeMs = wallTimeMs,
                                 isRaw = false,
                                 widePhysicalId = widePhysicalId,
                                 ultraPhysicalId = ultraPhysicalId,
-                                wideImageUri = wideUri,
-                                ultraImageUri = ultraUri,
+                                wideImageUri = wideOutUri,
+                                ultraImageUri = ultraOutUri,
                                 sbsUri = sbsUri,
                                 wideImageTimestampNs = wideImageTimestampNs,
                                 ultraImageTimestampNs = ultraImageTimestampNs,
                                 metrics = syncMetrics
                             )
-                            MediaStoreUtils.finalizePending(resolver, photoLogUri)
+                            MediaStoreUtils.finalizePending(resolver, logOutUri)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Saving individual lens JPEGs failed: ${e.message}", e)
+                        // Don't leave dangling pending entries
+                        MediaStoreUtils.delete(resolver, wideOutUri)
+                        MediaStoreUtils.delete(resolver, ultraOutUri)
+                        logOutUri?.let { MediaStoreUtils.delete(resolver, it) }
+                        callback.onError("Saving individual lens JPEGs failed: ${e.message}")
+                    }
+                }
+            } else {
+                // Still write JSON log if enabled, even when not saving individuals
+                if (photoLogUri != null) {
+                    val logOutUri = photoLogUri
+                    ioExecutor.execute {
+                        try {
+                            StereoPhotoLogger.writeJson(
+                                context = context,
+                                uri = logOutUri,
+                                captureId = captureId,
+                                wallTimeMs = wallTimeMs,
+                                isRaw = false,
+                                widePhysicalId = widePhysicalId,
+                                ultraPhysicalId = ultraPhysicalId,
+                                wideImageUri = null,
+                                ultraImageUri = null,
+                                sbsUri = sbsUri,
+                                wideImageTimestampNs = wideImageTimestampNs,
+                                ultraImageTimestampNs = ultraImageTimestampNs,
+                                metrics = syncMetrics
+                            )
+                            MediaStoreUtils.finalizePending(resolver, logOutUri)
                         } catch (e: Exception) {
-                            Log.e(TAG, "Photo JSON log write failed: ${e.message}", e)
-                            MediaStoreUtils.delete(resolver, photoLogUri)
+                            Log.e(TAG, "Writing photo JSON log failed: ${e.message}", e)
+                            MediaStoreUtils.delete(resolver, logOutUri)
                         }
                     }
+                }
+            }
 
-                    // --- SBS output (extra) ---
-                    // Run alignment + SBS JPEG encode on its own thread so it never blocks photo IO.
-                    if (sbsUri != null) {
-                        sbsExecutor.execute {
-                            try {
-                                val zoom2xForThisSbs = zoom2xEnabled  // snapshot current mode for this capture
+            // Always produce SBS
+            if (sbsUri != null) {
+                val sbsOutUri = sbsUri
+                sbsExecutor.execute {
+                    try {
+                        val zoom2xForThisSbs = zoom2xEnabled
+                        val sbsBytes = StereoSbs.alignAndCreateSbsJpegBytes(
+                            wideRight = wideFrame,
+                            ultraLeft = ultraFrame,
+                            zoom2xEnabled = zoom2xForThisSbs,
+                            fallbackUltraOverlapFraction = ultra3aFraction
+                        )
 
-                                val sbsBytes = StereoSbs.alignAndCreateSbsJpegBytes(
-                                    wideRightJpeg = wideBytes,
-                                    ultraLeftJpeg = ultraBytes,
-                                    zoom2xEnabled = zoom2xForThisSbs,
-                                    fallbackUltraOverlapFraction = ultra3aFraction
-                                )
-
-                                if (sbsBytes == null) {
-                                    MediaStoreUtils.delete(resolver, sbsUri)
-                                    return@execute
-                                }
-
-                                // Writes SBS bytes, then writes DateTime EXIF (same helper used for the individual JPEGs)
-                                saveJpegBytes(sbsUri, sbsBytes, exifDt, orientation = PlatformExif.ORIENTATION_NORMAL)
-
-                                MediaStoreUtils.finalizePending(resolver, sbsUri)
-                            } catch (e: Exception) {
-                                Log.e(TAG, "SBS save failed: ${e.message}", e)
-                                MediaStoreUtils.delete(resolver, sbsUri)
-
-                                // Important: don't call onError here (it resets UI state and can conflict with later actions)
-                                callback.onStatus("SBS save failed: ${e.message}")
-                            }
+                        if (sbsBytes == null) {
+                            Log.w(TAG, "SBS creation failed; deleting sbs pending URI")
+                            MediaStoreUtils.delete(resolver, sbsOutUri)
+                            return@execute
                         }
+
+                        saveJpegBytes(sbsOutUri, sbsBytes, exifDt, orientation = PlatformExif.ORIENTATION_NORMAL)
+                        MediaStoreUtils.finalizePending(resolver, sbsOutUri)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "SBS creation failed: ${e.message}", e)
+                        MediaStoreUtils.delete(resolver, sbsOutUri)
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "JPEG save failed: ${e.message}", e)
-                    MediaStoreUtils.delete(resolver, wideUri)
-                    MediaStoreUtils.delete(resolver, ultraUri)
-                    sbsUri?.let { MediaStoreUtils.delete(resolver, it) }
-                    photoLogUri?.let { MediaStoreUtils.delete(resolver, it) }
-                    callback.onError("JPEG save failed: ${e.message}")
                 }
             }
         } else {
-            // --- RAW path: cannot copy; keep Images open for background DNG write ---
-            val wideImage = requireNotNull(wideImg)
-            val ultraImage = requireNotNull(ultraImg)
-            val total = requireNotNull(result)
+            // --- RAW path: keep Images open for background DNG write ---
+            val wideOutUri = requireNotNull(wideUri) { "Raw capture requires wideUri" }
+            val ultraOutUri = requireNotNull(ultraUri) { "Raw capture requires ultraUri" }
+            val total = requireNotNull(totalResultNullable)
 
             ioExecutor.execute {
                 try {
                     val wideCharacteristics = requireNotNull(wideChars)
                     val ultraCharacteristics = requireNotNull(ultraChars)
 
-                    // START: new DNG improvements
-                    // Use per-physical TotalCaptureResult for correct color matrices, shading maps, etc.
-                    // This ensures each DNG has good colors and reduces WB mismatches between L-R
-                    val physicalTotals: Map<String, TotalCaptureResult> = try {
-                        total.physicalCameraTotalResults
-                    } catch (_: Throwable) {
-                        emptyMap()
-                    }
-                    val wideTotal = physicalTotals[widePhysicalId] ?: total
-                    val ultraTotal = physicalTotals[ultraPhysicalId] ?: total
-
                     // Write wide DNG, then close wide Image immediately.
                     try {
-                        saveDng(wideUri, wideCharacteristics, wideTotal, wideImage)
+                        saveDng(wideOutUri, wideCharacteristics, total, wideImg)
                     } finally {
-                        try { wideImage.close() } catch (_: Exception) {}
+                        try { wideImg.close() } catch (_: Exception) {}
                     }
 
                     // Write ultra DNG, then close ultra Image immediately.
                     try {
-                        saveDng(ultraUri, ultraCharacteristics, ultraTotal, ultraImage)
+                        saveDng(ultraOutUri, ultraCharacteristics, total, ultraImg)
                     } finally {
-                        try { ultraImage.close() } catch (_: Exception) {}
+                        try { ultraImg.close() } catch (_: Exception) {}
                     }
-                    // END: new DNG improvements
 
-                    MediaStoreUtils.finalizePending(resolver, wideUri)
-                    MediaStoreUtils.finalizePending(resolver, ultraUri)
+                    MediaStoreUtils.finalizePending(resolver, wideOutUri)
+                    MediaStoreUtils.finalizePending(resolver, ultraOutUri)
 
                     // Optional: per-photo JSON log (one per still capture)
                     if (photoLogUri != null) {
+                        val logOutUri = photoLogUri
                         try {
                             StereoPhotoLogger.writeJson(
                                 context = context,
-                                uri = photoLogUri,
+                                uri = logOutUri,
                                 captureId = captureId,
                                 wallTimeMs = wallTimeMs,
                                 isRaw = true,
                                 widePhysicalId = widePhysicalId,
                                 ultraPhysicalId = ultraPhysicalId,
-                                wideImageUri = wideUri,
-                                ultraImageUri = ultraUri,
+                                wideImageUri = wideOutUri,
+                                ultraImageUri = ultraOutUri,
                                 sbsUri = null,
                                 wideImageTimestampNs = wideImageTimestampNs,
                                 ultraImageTimestampNs = ultraImageTimestampNs,
                                 metrics = syncMetrics
                             )
-                            MediaStoreUtils.finalizePending(resolver, photoLogUri)
+                            MediaStoreUtils.finalizePending(resolver, logOutUri)
                         } catch (e: Exception) {
                             Log.e(TAG, "Photo JSON log write failed: ${e.message}", e)
-                            MediaStoreUtils.delete(resolver, photoLogUri)
+                            MediaStoreUtils.delete(resolver, logOutUri)
                         }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "DNG save failed: ${e.message}", e)
                     // Ensure images aren't leaked if an exception happens before the finally blocks above.
-                    try { wideImage.close() } catch (_: Exception) {}
-                    try { ultraImage.close() } catch (_: Exception) {}
+                    try { wideImg.close() } catch (_: Exception) {}
+                    try { ultraImg.close() } catch (_: Exception) {}
 
-                    MediaStoreUtils.delete(resolver, wideUri)
-                    MediaStoreUtils.delete(resolver, ultraUri)
+                    MediaStoreUtils.delete(resolver, wideOutUri)
+                    MediaStoreUtils.delete(resolver, ultraOutUri)
                     photoLogUri?.let { MediaStoreUtils.delete(resolver, it) }
                     callback.onError("DNG save failed: ${e.message}")
                 }
@@ -1711,12 +1753,71 @@ class StereoCameraController(
         }
     }
 
-    private fun imageToBytes(image: Image): ByteArray {
-        val plane = image.planes[0]
-        val buffer = plane.buffer
-        val bytes = ByteArray(buffer.remaining())
-        buffer.get(bytes)
-        return bytes
+    private fun yuv420ToNv21(image: Image): ByteArray {
+        require(image.format == ImageFormat.YUV_420_888) {
+            "Expected YUV_420_888 but was ${image.format}"
+        }
+
+        val width = image.width
+        val height = image.height
+        val ySize = width * height
+        val uvSize = width * height / 2
+        val out = ByteArray(ySize + uvSize)
+
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+
+        // ---- Y ----
+        val yBuffer = yPlane.buffer
+        yBuffer.rewind()
+        val yRowStride = yPlane.rowStride
+        val yPixelStride = yPlane.pixelStride
+
+        var outPos = 0
+        if (yPixelStride == 1 && yRowStride == width) {
+            yBuffer.get(out, 0, ySize)
+            outPos = ySize
+        } else {
+            val yBytes = ByteArray(yBuffer.remaining())
+            yBuffer.get(yBytes)
+            for (row in 0 until height) {
+                val rowStart = row * yRowStride
+                for (col in 0 until width) {
+                    out[outPos++] = yBytes[rowStart + col * yPixelStride]
+                }
+            }
+        }
+
+        // ---- VU (NV21) ----
+        val chromaWidth = (width + 1) / 2
+        val chromaHeight = (height + 1) / 2
+
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
+        uBuffer.rewind()
+        vBuffer.rewind()
+
+        val uRowStride = uPlane.rowStride
+        val vRowStride = vPlane.rowStride
+        val uPixelStride = uPlane.pixelStride
+        val vPixelStride = vPlane.pixelStride
+
+        val uBytes = ByteArray(uBuffer.remaining())
+        val vBytes = ByteArray(vBuffer.remaining())
+        uBuffer.get(uBytes)
+        vBuffer.get(vBytes)
+
+        for (row in 0 until chromaHeight) {
+            val uRowStart = row * uRowStride
+            val vRowStart = row * vRowStride
+            for (col in 0 until chromaWidth) {
+                out[outPos++] = vBytes[vRowStart + col * vPixelStride] // V
+                out[outPos++] = uBytes[uRowStart + col * uPixelStride] // U
+            }
+        }
+
+        return out
     }
 
     private fun failAndCleanupCurrentPhoto() {
@@ -1727,8 +1828,8 @@ class StereoCameraController(
         try { cap.ultraImage?.close() } catch (_: Exception) {}
 
         val resolver = context.contentResolver
-        MediaStoreUtils.delete(resolver, cap.wideUri)
-        MediaStoreUtils.delete(resolver, cap.ultraUri)
+        cap.wideUri?.let { MediaStoreUtils.delete(resolver, it) }
+        cap.ultraUri?.let { MediaStoreUtils.delete(resolver, it) }
 
         // so we don’t leave a dangling pending _sbs.jpg entry
         cap.sbsUri?.let { MediaStoreUtils.delete(resolver, it) }

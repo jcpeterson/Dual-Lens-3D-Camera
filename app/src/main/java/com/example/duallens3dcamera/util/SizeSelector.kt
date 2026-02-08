@@ -30,84 +30,17 @@ object SizeSelector {
         return candidates.maxBy { it.width.toLong() * it.height.toLong() }
     }
 
-
-    fun chooseCommonFourByThreeSizeAt30FpsPrivate(
-        wideMap: StreamConfigurationMap,
-        ultraMap: StreamConfigurationMap,
-        preferred: Size,
-        maxW: Int,
-        maxH: Int,
-        targetFps: Int
-    ): Pair<Size, String?> {
-        val wideSizes = (wideMap.getOutputSizes(ImageFormat.PRIVATE) ?: emptyArray())
-            .filter { isFourByThree(it) }
-            .filter { it.width <= maxW && it.height <= maxH }
-            .filter { supportsFps(wideMap, ImageFormat.PRIVATE, it, targetFps) }
-
-        val ultraSizes = (ultraMap.getOutputSizes(ImageFormat.PRIVATE) ?: emptyArray())
-            .filter { isFourByThree(it) }
-            .filter { it.width <= maxW && it.height <= maxH }
-            .filter { supportsFps(ultraMap, ImageFormat.PRIVATE, it, targetFps) }
-
-        val ultraSet = ultraSizes.map { it.width to it.height }.toSet()
-        val common = wideSizes.filter { ultraSet.contains(it.width to it.height) }
-
-        if (common.isEmpty()) {
-            Log.w(TAG, "No common PRIVATE 4:3 sizes found. Falling back.")
-            val fallback = wideSizes.firstOrNull() ?: preferred
-            return fallback to "No common PRIVATE 4:3 size; using ${fallback.width}x${fallback.height}."
+    fun chooseLargestYuvFourByThree(map: StreamConfigurationMap): Size {
+        val sizes = (map.getOutputSizes(ImageFormat.YUV_420_888) ?: emptyArray()).toList()
+        if (sizes.isEmpty()) {
+            // Safe fallback; should not happen on most devices.
+            return Size(1920, 1440)
         }
 
-        val exact = common.firstOrNull { it.width == preferred.width && it.height == preferred.height }
-        if (exact != null) return exact to null
+        val fourByThree = sizes.filter { isFourByThree(it) }
+        val candidates = if (fourByThree.isNotEmpty()) fourByThree else sizes
 
-        val best = common.maxBy { it.width.toLong() * it.height.toLong() }
-        return best to "1920x1440@30 not common; fallback to ${best.width}x${best.height}@30."
-    }
-
-    fun choosePreviewFourByThree(
-        wideMap: StreamConfigurationMap,
-        maxW: Int,
-        maxH: Int
-    ): Size {
-        val sizes = (wideMap.getOutputSizes(android.graphics.SurfaceTexture::class.java) ?: emptyArray())
-            .filter { isFourByThree(it) }
-            .filter { it.width <= maxW && it.height <= maxH }
-
-        return sizes.maxByOrNull { it.width.toLong() * it.height.toLong() }
-            ?: Size(1280, 960)
-    }
-
-    fun chooseCommonJpegFourByThree(
-        wideMap: StreamConfigurationMap,
-        ultraMap: StreamConfigurationMap,
-        maxW: Int,
-        maxH: Int,
-        preferred: Size?
-    ): Pair<Size, String?> {
-        val wideSizes = (wideMap.getOutputSizes(ImageFormat.JPEG) ?: emptyArray())
-            .filter { isFourByThree(it) }
-            .filter { it.width <= maxW && it.height <= maxH }
-
-        val ultraSizes = (ultraMap.getOutputSizes(ImageFormat.JPEG) ?: emptyArray())
-            .filter { isFourByThree(it) }
-            .filter { it.width <= maxW && it.height <= maxH }
-
-        val ultraSet = ultraSizes.map { it.width to it.height }.toSet()
-        val common = wideSizes.filter { ultraSet.contains(it.width to it.height) }
-
-        if (common.isEmpty()) {
-            val fallback = preferred ?: wideSizes.firstOrNull() ?: Size(1920, 1440)
-            return fallback to "No common JPEG 4:3 size; using ${fallback.width}x${fallback.height}."
-        }
-
-        if (preferred != null) {
-            val exact = common.firstOrNull { it.width == preferred.width && it.height == preferred.height }
-            if (exact != null) return exact to null
-        }
-
-        val best = common.maxBy { it.width.toLong() * it.height.toLong() }
-        return best to null
+        return candidates.maxBy { it.width.toLong() * it.height.toLong() }
     }
 
     fun chooseLargestRaw(map: StreamConfigurationMap): Size? {
