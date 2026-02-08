@@ -1054,7 +1054,6 @@ class StereoCameraController(
                     session = sess
                     try {
                         val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-//                        val builder = createRequest(camera, CameraDevice.TEMPLATE_PREVIEW).apply {
                             addTarget(preview)
                             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
@@ -1323,11 +1322,13 @@ class StereoCameraController(
                 // END: relevant to RAW only
 
                 // Best-effort: ZSL/HDR off
-                try { set(CaptureRequest.CONTROL_ENABLE_ZSL, false) } catch (_: Exception) {}
+                // NOTE: don't think I need the following line
+                // try { set(CaptureRequest.CONTROL_ENABLE_ZSL, false) } catch (_: Exception) {}
+                // turn off CONTROL_SCENE_MODE to be sure and avoid hdr (CONTROL_SCENE_MODE_HDR)
                 set(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_DISABLED)
+                // set 3A to be controlled automatically
                 set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
 
-                //applyCommonNoCropNoStab(this, isVideo = false)
                 applyCommonNoCropNoStab(this, isVideo = false, targetFps = previewTargetFps)
                 applyTorch(this)
 
@@ -1712,14 +1713,14 @@ class StereoCameraController(
         result: TotalCaptureResult,
         image: Image
     ) {
-        val dngCreator = android.hardware.camera2.DngCreator(characteristics, result)
+        val dngCreator = DngCreator(characteristics, result)
 
-        // Keep orientation via DngCreator (no ExifInterface post-write: avoids full DNG rewrite).
+        // Set image orientation via DngCreator.
+        // Avoid ExifInterface which rewrites the entire DNG file.
         val orientationConst = exifOrientationFromDegrees(computeJpegOrientation())
         try {
             dngCreator.setOrientation(orientationConst)
         } catch (e: Exception) {
-            // Extremely unlikely with a valid orientationConst; log and continue.
             Log.w(TAG, "DngCreator.setOrientation failed: ${e.message}")
         }
 
@@ -1728,8 +1729,6 @@ class StereoCameraController(
             os.flush()
         } ?: throw IllegalStateException("openOutputStream failed for $uri")
 
-        // Intentionally no ExifInterface edits for DNG:
-        // ExifInterface can rewrite the whole file (big + slow), and provides no benefit we can't live without.
     }
 
     private fun setExifDateTimeOriginal(uri: Uri, exifDateTimeOriginal: String, orientation: Int? = null) {
