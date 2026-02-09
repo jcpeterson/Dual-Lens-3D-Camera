@@ -6,4 +6,18 @@
         <item name="android:colorBackground">@color/black</item>
         <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
     </style>
+
+    <!--
+         Settings should follow the system Day/Night palette.
+         The main camera UI intentionally forces a black background, but that makes
+         Preference text hard to read in light mode.
+    -->
+    <style name="Theme.DualLens3DCamera.Settings" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@color/black</item>
+        <item name="android:navigationBarColor">@color/black</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
+
+        <!-- Ensure Preference screens use the right text/background colors for Day/Night. -->
+        <item name="preferenceTheme">@style/PreferenceThemeOverlay</item>
+    </style>
 </resources>
