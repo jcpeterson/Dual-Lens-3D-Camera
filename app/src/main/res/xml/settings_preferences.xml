@@ -20,6 +20,11 @@
             android:title="Edge mode"
             android:defaultValue="off" />
 
+        <ListPreference
+            android:key="photo_ultrawide_prime_interval"
+            android:title="Ultrawide priming interval"
+            android:defaultValue="off" />
+
         <androidx.preference.SwitchPreferenceCompat
             android:key="photo_save_individual_images"
             android:title="Save individual wide/ultrawide photos"

@@ -7,7 +7,7 @@ It's currently tested and working on:
 - Samsung S22 (photos only), S24 and Fold5.
 - Pixel 7, 7a, 7 Pro, 8, 8 Pro, 9a, and 10.
 
-So far, photo and video sync is best on Pixel 7 series (~2ms for photos, ~4ms for video).
+So far, left-right image sync is best on Pixel 7 series (~1-4ms for photos, ~4ms for video).
 
 Phones with ultrawide autofocus (e.g., Pixel 7 Pro) will provide the best image quality.
 
