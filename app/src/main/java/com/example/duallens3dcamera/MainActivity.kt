@@ -256,20 +256,28 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
 //        )
 
         previewConfig = controller.start(
-            surfaceTexture = st,
-            displayRotation = rotation,
-            initialRawMode = rawMode,
-            initialTorchOn = torchOn,
-            initialRequestedRecordSize = currentRequestedRecordSize(),
-            initialRequestedRecordFps = currentVideoFps(),
-            initialVideoBitrateBps = currentVideoBitrateBps(),
-            initialEisEnabled = eisEnabled,
-            initialZoom2x = zoom2xEnabled,
-            initialPreviewSize = previewResolution,
-            initialPreviewTargetFps = previewFps,
-            initialPhotoNoiseReductionMode = photoNoiseReductionMode,
-            initialPhotoDistortionCorrectionMode = photoDistortionCorrectionMode,
-            initialPhotoEdgeMode = photoEdgeMode
+            StereoCameraController.StartParams(
+                surfaceTexture = st,
+                displayRotation = rotation,
+                rawMode = rawMode,
+                torchOn = torchOn,
+                zoom2xEnabled = zoom2xEnabled,
+                video = StereoCameraController.VideoConfig(
+                    requestedRecordSize = currentRequestedRecordSize(),
+                    requestedRecordFps = currentVideoFps(),
+                    videoBitrateBps = currentVideoBitrateBps(),
+                    eisEnabled = eisEnabled
+                ),
+                preview = StereoCameraController.PreviewSettings(
+                    requestedPreviewSize = previewResolution,
+                    previewTargetFps = previewFps
+                ),
+                photo = StereoCameraController.PhotoTuning(
+                    noiseReductionMode = photoNoiseReductionMode,
+                    distortionCorrectionMode = photoDistortionCorrectionMode,
+                    edgeMode = photoEdgeMode
+                )
+            )
         )
 
         binding.textureView.post {

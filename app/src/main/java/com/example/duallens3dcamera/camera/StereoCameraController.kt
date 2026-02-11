@@ -17,11 +17,13 @@ import android.util.Log
 import android.util.Range
 import android.util.Size
 import android.view.Surface
-import androidx.exifinterface.media.ExifInterface
 import com.example.duallens3dcamera.util.StereoSbs
 import com.example.duallens3dcamera.encoding.AudioEncoder
 import com.example.duallens3dcamera.encoding.Mp4Muxer
 import com.example.duallens3dcamera.encoding.VideoEncoder
+import com.example.duallens3dcamera.image.toNv21
+import com.example.duallens3dcamera.media.DngWriter
+import com.example.duallens3dcamera.media.ImageWriters
 import com.example.duallens3dcamera.media.MediaStoreUtils
 import com.example.duallens3dcamera.util.SizeSelector
 import com.example.duallens3dcamera.logging.StereoRecordingLogger
@@ -56,6 +58,35 @@ class StereoCameraController(
         val previewSize: Size,
         val sensorOrientation: Int,
         val recordSize: Size
+    )
+
+    data class VideoConfig(
+        val requestedRecordSize: Size,
+        val requestedRecordFps: Int,
+        val videoBitrateBps: Int,
+        val eisEnabled: Boolean
+    )
+
+    data class PreviewSettings(
+        val requestedPreviewSize: Size,
+        val previewTargetFps: Int
+    )
+
+    data class PhotoTuning(
+        val noiseReductionMode: Int,
+        val distortionCorrectionMode: Int,
+        val edgeMode: Int
+    )
+
+    data class StartParams(
+        val surfaceTexture: SurfaceTexture,
+        val displayRotation: Int,
+        val rawMode: Boolean,
+        val torchOn: Boolean,
+        val zoom2xEnabled: Boolean,
+        val video: VideoConfig,
+        val preview: PreviewSettings,
+        val photo: PhotoTuning
     )
 
     companion object {
@@ -244,51 +275,36 @@ class StereoCameraController(
     private var recordCaptureCallback: CameraCaptureSession.CaptureCallback? = null
     // end logging vars
 
-    fun start(
-        surfaceTexture: SurfaceTexture,
-        displayRotation: Int,
-        initialRawMode: Boolean,
-        initialTorchOn: Boolean,
-        initialRequestedRecordSize: Size,
-        initialRequestedRecordFps: Int,
-        initialVideoBitrateBps: Int,
-        initialEisEnabled: Boolean,
-        initialZoom2x: Boolean,
-        initialPreviewSize: Size,
-        initialPreviewTargetFps: Int,
-        initialPhotoNoiseReductionMode: Int,
-        initialPhotoDistortionCorrectionMode: Int,
-        initialPhotoEdgeMode: Int
-    ): PreviewConfig {
-        this.surfaceTexture = surfaceTexture
-        this.displayRotation = displayRotation
-        this.isRawMode = initialRawMode
-        this.torchOn = initialTorchOn
+    fun start(params: StartParams): PreviewConfig {
+        this.surfaceTexture = params.surfaceTexture
+        this.displayRotation = params.displayRotation
+        this.isRawMode = params.rawMode
+        this.torchOn = params.torchOn
 
         // video config
-        this.requestedRecordSize = initialRequestedRecordSize
-        this.requestedRecordFps = initialRequestedRecordFps
-        this.videoBitrateBps = initialVideoBitrateBps
-        this.eisEnabled = initialEisEnabled
+        this.requestedRecordSize = params.video.requestedRecordSize
+        this.requestedRecordFps = params.video.requestedRecordFps
+        this.videoBitrateBps = params.video.videoBitrateBps
+        this.eisEnabled = params.video.eisEnabled
 
         // preview config
-        this.requestedPreviewSize = initialPreviewSize
-        this.previewTargetFps = initialPreviewTargetFps
+        this.requestedPreviewSize = params.preview.requestedPreviewSize
+        this.previewTargetFps = params.preview.previewTargetFps
 
         // photo tuning
-        this.photoNoiseReductionMode = initialPhotoNoiseReductionMode
-        this.photoDistortionCorrectionMode = initialPhotoDistortionCorrectionMode
-        this.photoEdgeMode = initialPhotoEdgeMode
+        this.photoNoiseReductionMode = params.photo.noiseReductionMode
+        this.photoDistortionCorrectionMode = params.photo.distortionCorrectionMode
+        this.photoEdgeMode = params.photo.edgeMode
 
-        this.zoom2xEnabled = initialZoom2x
+        this.zoom2xEnabled = params.zoom2xEnabled
         // We'll pick the correct wide physical ID in selectCharacteristicsAndSizes() after LensDiscovery runs.
         this.widePhysicalId = WIDE_1X_PHYSICAL_ID
 
         startThreads()
         selectCharacteristicsAndSizes()
 
-        surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
-        previewSurface = Surface(surfaceTexture)
+        params.surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
+        previewSurface = Surface(params.surfaceTexture)
 
         openCamera()
 
@@ -1644,10 +1660,10 @@ class StereoCameraController(
             val ultraW = ultraImg.width
             val ultraH = ultraImg.height
 
-            val wideNv21 = try { yuv420ToNv21(wideImg) } finally {
+            val wideNv21 = try { wideImg.toNv21() } finally {
                 try { wideImg.close() } catch (_: Exception) {}
             }
-            val ultraNv21 = try { yuv420ToNv21(ultraImg) } finally {
+            val ultraNv21 = try { ultraImg.toNv21() } finally {
                 try { ultraImg.close() } catch (_: Exception) {}
             }
 
@@ -1677,8 +1693,20 @@ class StereoCameraController(
                         val ultraJpeg = StereoSbs.yuvToJpegBytes(ultraFrame, jpegQuality = 100)
                             ?: throw IllegalStateException("Ultra YUV->JPEG encode failed")
 
-                        saveJpegBytes(wideOutUri, wideJpeg, exifDt, orientation = PlatformExif.ORIENTATION_NORMAL)
-                        saveJpegBytes(ultraOutUri, ultraJpeg, exifDt, orientation = PlatformExif.ORIENTATION_NORMAL)
+                        ImageWriters.writeJpegWithExif(
+                            context = context,
+                            uri = wideOutUri,
+                            bytes = wideJpeg,
+                            exifDateTimeOriginal = exifDt,
+                            exifOrientation = PlatformExif.ORIENTATION_NORMAL
+                        )
+                        ImageWriters.writeJpegWithExif(
+                            context = context,
+                            uri = ultraOutUri,
+                            bytes = ultraJpeg,
+                            exifDateTimeOriginal = exifDt,
+                            exifOrientation = PlatformExif.ORIENTATION_NORMAL
+                        )
                         MediaStoreUtils.finalizePending(resolver, wideOutUri)
                         MediaStoreUtils.finalizePending(resolver, ultraOutUri)
 
@@ -1754,7 +1782,13 @@ class StereoCameraController(
                             return@execute
                         }
 
-                        saveJpegBytes(sbsOutUri, sbsBytes, exifDt, orientation = PlatformExif.ORIENTATION_NORMAL)
+                        ImageWriters.writeJpegWithExif(
+                            context = context,
+                            uri = sbsOutUri,
+                            bytes = sbsBytes,
+                            exifDateTimeOriginal = exifDt,
+                            exifOrientation = PlatformExif.ORIENTATION_NORMAL
+                        )
                         MediaStoreUtils.finalizePending(resolver, sbsOutUri)
                     } catch (e: Exception) {
                         Log.e(TAG, "SBS creation failed: ${e.message}", e)
@@ -1767,6 +1801,7 @@ class StereoCameraController(
             val wideOutUri = requireNotNull(wideUri) { "Raw capture requires wideUri" }
             val ultraOutUri = requireNotNull(ultraUri) { "Raw capture requires ultraUri" }
             val total = requireNotNull(totalResultNullable)
+            val dngOrientation = exifOrientationFromDegrees(rotationDegrees)
 
             ioExecutor.execute {
                 try {
@@ -1775,14 +1810,28 @@ class StereoCameraController(
 
                     // Write wide DNG, then close wide Image immediately.
                     try {
-                        saveDng(wideOutUri, wideCharacteristics, total, wideImg)
+                        DngWriter.writeDng(
+                            context = context,
+                            uri = wideOutUri,
+                            characteristics = wideCharacteristics,
+                            result = total,
+                            image = wideImg,
+                            orientation = dngOrientation
+                        )
                     } finally {
                         try { wideImg.close() } catch (_: Exception) {}
                     }
 
                     // Write ultra DNG, then close ultra Image immediately.
                     try {
-                        saveDng(ultraOutUri, ultraCharacteristics, total, ultraImg)
+                        DngWriter.writeDng(
+                            context = context,
+                            uri = ultraOutUri,
+                            characteristics = ultraCharacteristics,
+                            result = total,
+                            image = ultraImg,
+                            orientation = dngOrientation
+                        )
                     } finally {
                         try { ultraImg.close() } catch (_: Exception) {}
                     }
@@ -1826,128 +1875,6 @@ class StereoCameraController(
                 }
             }
         }
-    }
-
-    private fun saveJpegBytes(
-        uri: Uri,
-        bytes: ByteArray,
-        exifDateTimeOriginal: String,
-        orientation: Int? = null
-    ) {
-        context.contentResolver.openOutputStream(uri)?.use { os ->
-            os.write(bytes)
-            os.flush()
-        } ?: throw IllegalStateException("openOutputStream failed for $uri")
-
-        // DateTimeOriginal (+ optionally orientation)
-        setExifDateTimeOriginal(uri, exifDateTimeOriginal, orientation)
-    }
-
-    private fun saveDng(
-        uri: Uri,
-        characteristics: CameraCharacteristics,
-        result: TotalCaptureResult,
-        image: Image
-    ) {
-        val dngCreator = DngCreator(characteristics, result)
-
-        // Set image orientation via DngCreator.
-        // Avoid ExifInterface which rewrites the entire DNG file.
-        val orientationConst = exifOrientationFromDegrees(computeJpegOrientation())
-        try {
-            dngCreator.setOrientation(orientationConst)
-        } catch (e: Exception) {
-            Log.w(TAG, "DngCreator.setOrientation failed: ${e.message}")
-        }
-
-        context.contentResolver.openOutputStream(uri)?.use { os ->
-            dngCreator.writeImage(os, image)
-            os.flush()
-        } ?: throw IllegalStateException("openOutputStream failed for $uri")
-
-    }
-
-    private fun setExifDateTimeOriginal(uri: Uri, exifDateTimeOriginal: String, orientation: Int? = null) {
-        try {
-            context.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
-                val exif = ExifInterface(pfd.fileDescriptor)
-
-                exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, exifDateTimeOriginal)
-                exif.setAttribute(ExifInterface.TAG_DATETIME_DIGITIZED, exifDateTimeOriginal)
-                exif.setAttribute(ExifInterface.TAG_DATETIME, exifDateTimeOriginal)
-
-                exif.saveAttributes()
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to set EXIF attributes: ${e.message}")
-        }
-    }
-
-    private fun yuv420ToNv21(image: Image): ByteArray {
-        require(image.format == ImageFormat.YUV_420_888) {
-            "Expected YUV_420_888 but was ${image.format}"
-        }
-
-        val width = image.width
-        val height = image.height
-        val ySize = width * height
-        val uvSize = width * height / 2
-        val out = ByteArray(ySize + uvSize)
-
-        val yPlane = image.planes[0]
-        val uPlane = image.planes[1]
-        val vPlane = image.planes[2]
-
-        // ---- Y ----
-        val yBuffer = yPlane.buffer
-        yBuffer.rewind()
-        val yRowStride = yPlane.rowStride
-        val yPixelStride = yPlane.pixelStride
-
-        var outPos = 0
-        if (yPixelStride == 1 && yRowStride == width) {
-            yBuffer.get(out, 0, ySize)
-            outPos = ySize
-        } else {
-            val yBytes = ByteArray(yBuffer.remaining())
-            yBuffer.get(yBytes)
-            for (row in 0 until height) {
-                val rowStart = row * yRowStride
-                for (col in 0 until width) {
-                    out[outPos++] = yBytes[rowStart + col * yPixelStride]
-                }
-            }
-        }
-
-        // ---- VU (NV21) ----
-        val chromaWidth = (width + 1) / 2
-        val chromaHeight = (height + 1) / 2
-
-        val uBuffer = uPlane.buffer
-        val vBuffer = vPlane.buffer
-        uBuffer.rewind()
-        vBuffer.rewind()
-
-        val uRowStride = uPlane.rowStride
-        val vRowStride = vPlane.rowStride
-        val uPixelStride = uPlane.pixelStride
-        val vPixelStride = vPlane.pixelStride
-
-        val uBytes = ByteArray(uBuffer.remaining())
-        val vBytes = ByteArray(vBuffer.remaining())
-        uBuffer.get(uBytes)
-        vBuffer.get(vBytes)
-
-        for (row in 0 until chromaHeight) {
-            val uRowStart = row * uRowStride
-            val vRowStart = row * vRowStride
-            for (col in 0 until chromaWidth) {
-                out[outPos++] = vBytes[vRowStart + col * vPixelStride] // V
-                out[outPos++] = uBytes[uRowStart + col * uPixelStride] // U
-            }
-        }
-
-        return out
     }
 
     private fun failAndCleanupCurrentPhoto() {
