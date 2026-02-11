@@ -402,8 +402,8 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
             enablePhotoSyncToast = AppSettings.getDebugPhotoSyncToastEnabled(this)
         )
         controller.setPhotoSaveIndividualLensImages(saveIndividualLensImages)
-        controller.setUltrawidePrimingMode(
-            AppSettings.getPhotoUltrawidePrimeIntervalSetting(this)
+        controller.setPrimeUwOnActive(
+            AppSettings.getPhotoPrimeUwOnActiveEnabled(this)
         )
     }
 

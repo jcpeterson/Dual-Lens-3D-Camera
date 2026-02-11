@@ -42,7 +42,6 @@ class SettingsFragment : PreferenceFragmentCompat() {
         val noise = findPreference<ListPreference>(AppSettings.KEY_PHOTO_NOISE_REDUCTION) ?: return
         val dist = findPreference<ListPreference>(AppSettings.KEY_PHOTO_DISTORTION_CORRECTION) ?: return
         val edge = findPreference<ListPreference>(AppSettings.KEY_PHOTO_EDGE_MODE) ?: return
-        val prime = findPreference<ListPreference>(AppSettings.KEY_PHOTO_ULTRAWIDE_PRIME_INTERVAL)
 
         noise.entries = arrayOf("Off", "Fast", "High quality")
         noise.entryValues = arrayOf("off", "fast", "hq")
@@ -55,19 +54,6 @@ class SettingsFragment : PreferenceFragmentCompat() {
         edge.entries = arrayOf("Off", "Fast", "High quality")
         edge.entryValues = arrayOf("off", "fast", "hq")
         edge.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-
-        prime?.entries = arrayOf(
-            "Off",
-            "Once when app becomes active",
-            "Every 1s",
-            "Every 2s",
-            "Every 3s",
-            "Every 4s",
-            "Every 5s",
-            "Every 10s"
-        )
-        prime?.entryValues = arrayOf("off", "on_app_open", "1", "2", "3", "4", "5", "10")
-        prime?.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
     }
 
     private fun setupBitratePref() {

@@ -192,21 +192,13 @@ class StereoCameraController(
 
 
     // Ultrawide priming (settings)
-    // Off by default. When enabled, we periodically fire a tiny ultrawide-only capture and discard it.
-    // This "primes" the ultrawide AF/ISP so the first real stereo capture isn't blurry on some devices (e.g. Pixel 7 Pro).
-    @Volatile private var ultrawidePrimeEnabled: Boolean = false
-    @Volatile private var ultrawidePrimeIntervalMs: Long = 0L // 0 = once when app becomes active; >0 = periodic
-
-    private var ultrawidePrimePending: Boolean = false
-    private var ultrawidePrimeInFlight: Boolean = false
-    private var ultrawidePrimeLastWallMs: Long = 0L
-
-    // Some devices may reject certain stream combinations (e.g. RAW + extra YUV). If session config fails,
-    // fall back to priming using the existing ultrawide still reader (full-res) instead of the tiny reader.
-    private var ultrawidePrimeStreamAllowed: Boolean = true
-    private var ultrawidePrimeReader: ImageReader? = null
-
-    private val ultrawidePrimeRunnable = Runnable { runUltrawidePrimeTick() }
+    // OFF by default. When enabled, we fire one ultrawide-only discarded capture when the
+    // preview session becomes active. This is a lightweight workaround for some Pixel phones
+    // with ultrawide autofocus that can produce a blurry first ultrawide frame otherwise.
+    @Volatile private var primeUwOnActiveEnabled: Boolean = false
+    private var primeUwPending: Boolean = false
+    private var primeUwInFlight: Boolean = false
+    private val primeUwRunnable = Runnable { runPrimeUwIfNeeded() }
 
 
     // Preview repeating builder for current mode.
@@ -345,41 +337,25 @@ class StereoCameraController(
         this.saveIndividualLensImages = enabled
     }
 
-
-    fun setUltrawidePrimingMode(mode: String) {
-        val (enabled, intervalMs) = parseUltrawidePrimeMode(mode)
-        ultrawidePrimeEnabled = enabled
-        ultrawidePrimeIntervalMs = intervalMs
-
-        // Prime once immediately when enabled (on next session start), then continue at interval (if >0).
-        ultrawidePrimePending = enabled
-        ultrawidePrimeLastWallMs = 0L
-
-        // If a previous attempt at adding the tiny prime stream failed, allow retry when the user changes the setting.
-        ultrawidePrimeStreamAllowed = true
-
-        // If the camera is already running, rebuild the preview session so the prime stream is added/removed.
+    fun setPrimeUwOnActive(enabled: Boolean) {
+        // Called from UI thread. Marshal to the camera thread to avoid races with session state.
         val handler = cameraHandler
         if (handler != null) {
             handler.post {
-                if (!isRecording && cameraDevice != null && previewSurface != null) {
-                    createPreviewSession()
-                } else {
-                    // Not running yet; createPreviewSession() will read the updated fields when it starts.
-                    cancelUltrawidePrimingLocked()
+                primeUwOnActiveEnabled = enabled
+                if (!enabled) {
+                    cancelPrimeUwLocked()
+                    return@post
                 }
-            }
-        }
-    }
 
-    private fun parseUltrawidePrimeMode(mode: String): Pair<Boolean, Long> {
-        return when (mode) {
-            "off" -> false to 0L
-            "on_app_open" -> true to 0L
-            else -> {
-                val seconds = mode.toLongOrNull()
-                if (seconds != null && seconds > 0) true to (seconds * 1000L) else (false to 0L)
+                // Trigger once as soon as possible (either on the current session, or the next session start).
+                primeUwPending = true
+                handler.removeCallbacks(primeUwRunnable)
+                handler.post(primeUwRunnable)
             }
+        } else {
+            primeUwOnActiveEnabled = enabled
+            primeUwPending = enabled
         }
     }
 
@@ -448,7 +424,7 @@ class StereoCameraController(
 
         val latch = CountDownLatch(1)
         handler.post {
-            cancelUltrawidePrimingLocked()
+            cancelPrimeUwLocked()
 
             try {
                 safeStopRecordingInternal(deleteOnFailure = false)
@@ -672,7 +648,7 @@ class StereoCameraController(
         }
 
         handler.post {
-            cancelUltrawidePrimingLocked()
+            cancelPrimeUwLocked()
 
             if (isRecording) {
                 callback.onError("Already recording.")
@@ -1068,7 +1044,7 @@ class StereoCameraController(
         repeatingBuilder = null
         recordCaptureCallback = null
 
-        cancelUltrawidePrimingLocked()
+        cancelPrimeUwLocked()
 
         closeReaders()
 
@@ -1103,33 +1079,10 @@ class StereoCameraController(
             setOnImageAvailableListener({ reader -> onStillImageAvailable(isWide = false, reader = reader) }, handler)
         }
 
-        // Optional: ultrawide priming stream (tiny YUV). Only created when enabled.
-        ultrawidePrimeReader = null
-        if (ultrawidePrimeEnabled && ultrawidePrimeStreamAllowed) {
-            val primeSize = chooseUltrawidePrimeSize()
-            if (primeSize != null) {
-                ultrawidePrimeReader = ImageReader.newInstance(
-                    primeSize.width,
-                    primeSize.height,
-                    ImageFormat.YUV_420_888,
-                    2
-                ).apply {
-                    setOnImageAvailableListener({ r ->
-                        val img = try { r.acquireLatestImage() } catch (_: Exception) { null }
-                        try { img?.close() } catch (_: Exception) {}
-                    }, handler)
-                }
-            }
-        }
-
-
-        val outputs = ArrayList<OutputConfiguration>(if (ultrawidePrimeReader != null) 4 else 3).apply {
+        val outputs = ArrayList<OutputConfiguration>(3).apply {
             add(OutputConfiguration(preview).apply { setPhysicalCameraId(widePhysicalId) })
             add(OutputConfiguration(requireNotNull(wideReader).surface).apply { setPhysicalCameraId(widePhysicalId) })
             add(OutputConfiguration(requireNotNull(ultraReader).surface).apply { setPhysicalCameraId(ultraPhysicalId) })
-            ultrawidePrimeReader?.let { prime ->
-                add(OutputConfiguration(prime.surface).apply { setPhysicalCameraId(ultraPhysicalId) })
-            }
         }
 
         camera.createCaptureSessionByOutputConfigurations(
@@ -1159,7 +1112,12 @@ class StereoCameraController(
                         }
                         repeatingBuilder = builder
                         sess.setRepeatingRequest(builder.build(), null, handler)
-                        startUltrawidePrimingLocked()
+                        // One-time ultrawide priming (optional)
+                        if (primeUwOnActiveEnabled) {
+                            primeUwPending = true
+                            handler.removeCallbacks(primeUwRunnable)
+                            handler.post(primeUwRunnable)
+                        }
                     } catch (e: Exception) {
                         callback.onError("Preview repeating request failed: ${e.message}")
                         Log.e(TAG, "Preview repeating request failed: ${e.message}", e)
@@ -1167,17 +1125,6 @@ class StereoCameraController(
                 }
 
                 override fun onConfigureFailed(sess: CameraCaptureSession) {
-                    // Some devices reject certain stream combinations (e.g. RAW + extra tiny YUV).
-                    // If we were trying to add the tiny priming stream, retry without it.
-                    if (ultrawidePrimeReader != null && ultrawidePrimeStreamAllowed) {
-                        Log.w(TAG, "Preview session configure failed with ultrawide prime stream; retrying without it.")
-                        ultrawidePrimeStreamAllowed = false
-                        try { ultrawidePrimeReader?.close() } catch (_: Exception) {}
-                        ultrawidePrimeReader = null
-                        createPreviewSession()
-                        return
-                    }
-
                     callback.onError("Preview session configure failed.")
                 }
             },
@@ -1190,78 +1137,42 @@ class StereoCameraController(
     // Ultrawide priming (optional)
     // ---------------------------------------------------------------------------------------------
 
-    private fun cancelUltrawidePrimingLocked() {
+    private fun cancelPrimeUwLocked() {
         val handler = cameraHandler ?: return
-        handler.removeCallbacks(ultrawidePrimeRunnable)
-        ultrawidePrimeInFlight = false
+        handler.removeCallbacks(primeUwRunnable)
+        primeUwPending = false
+        primeUwInFlight = false
     }
 
-    private fun startUltrawidePrimingLocked() {
+    private fun runPrimeUwIfNeeded() {
         val handler = cameraHandler ?: return
-        handler.removeCallbacks(ultrawidePrimeRunnable)
+        handler.removeCallbacks(primeUwRunnable)
 
-        if (!ultrawidePrimeEnabled) return
+        if (!primeUwOnActiveEnabled) {
+            primeUwPending = false
+            primeUwInFlight = false
+            return
+        }
 
-        // Prime once immediately on session start/resume, then keep going at the configured interval (if any).
-        ultrawidePrimePending = true
-        ultrawidePrimeLastWallMs = 0L
-
-        handler.post(ultrawidePrimeRunnable)
-    }
-
-    private fun runUltrawidePrimeTick() {
-        val handler = cameraHandler ?: return
-
-        // Remove any queued ticks so we don't accumulate under load.
-        handler.removeCallbacks(ultrawidePrimeRunnable)
-
-        if (!ultrawidePrimeEnabled) return
-        if (isRecording) return // recording sessions don't include the prime surface
+        if (!primeUwPending) return
+        if (isRecording) {
+            // Recording sessions do not include the still outputs; we'll prime next time the preview session starts.
+            return
+        }
 
         if (cameraDevice == null || session == null) {
-            // Session isn't ready yet; try again shortly.
-            handler.postDelayed(ultrawidePrimeRunnable, 250L)
+            handler.postDelayed(primeUwRunnable, 200L)
             return
         }
 
         // Don't interfere with real still capture.
-        if (currentPhoto != null || ultrawidePrimeInFlight) {
-            handler.postDelayed(ultrawidePrimeRunnable, 200L)
+        if (currentPhoto != null || primeUwInFlight) {
+            handler.postDelayed(primeUwRunnable, 200L)
             return
         }
 
-        val now = System.currentTimeMillis()
-
-        val due = ultrawidePrimePending ||
-            (ultrawidePrimeIntervalMs > 0 &&
-                (ultrawidePrimeLastWallMs == 0L || now - ultrawidePrimeLastWallMs >= ultrawidePrimeIntervalMs))
-
-        if (due) {
-            ultrawidePrimePending = false
-            ultrawidePrimeLastWallMs = now
-            doUltrawidePrimeCaptureLocked()
-        }
-
-        // Schedule next tick if periodic.
-        if (ultrawidePrimeIntervalMs > 0) {
-            handler.postDelayed(ultrawidePrimeRunnable, ultrawidePrimeIntervalMs)
-        }
-    }
-
-    private fun chooseUltrawidePrimeSize(): Size? {
-        val map = ultraMap ?: return null
-        val sizes = (map.getOutputSizes(ImageFormat.YUV_420_888) ?: emptyArray()).toList()
-        if (sizes.isEmpty()) return null
-
-        val preferred = listOf(Size(320, 240), Size(640, 480), Size(800, 600))
-        for (p in preferred) {
-            sizes.firstOrNull { it.width == p.width && it.height == p.height }?.let { return it }
-        }
-
-        val fourByThree = sizes.filter { SizeSelector.isFourByThree(it, tolerance = 0.03f) }
-        val candidates = if (fourByThree.isNotEmpty()) fourByThree else sizes
-
-        return candidates.minByOrNull { it.width.toLong() * it.height.toLong() } ?: candidates.first()
+        primeUwPending = false
+        doUltrawidePrimeCaptureLocked()
     }
 
     private fun doUltrawidePrimeCaptureLocked() {
@@ -1269,11 +1180,11 @@ class StereoCameraController(
         val sess = session ?: return
         val handler = cameraHandler ?: return
 
-        // Prefer the tiny prime reader when available; fall back to the full-res ultrawide still reader otherwise.
-        val targetSurface = ultrawidePrimeReader?.surface ?: ultraReader?.surface ?: return
+        // Target the existing ultrawide still reader. Image is discarded because currentPhoto == null.
+        val targetSurface = ultraReader?.surface ?: return
 
         try {
-            ultrawidePrimeInFlight = true
+            primeUwInFlight = true
 
             val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(targetSurface)
@@ -1295,22 +1206,22 @@ class StereoCameraController(
                 builder.build(),
                 object : CameraCaptureSession.CaptureCallback() {
                     override fun onCaptureSequenceCompleted(session: CameraCaptureSession, sequenceId: Int, frameNumber: Long) {
-                        ultrawidePrimeInFlight = false
+                        primeUwInFlight = false
                     }
 
                     override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
-                        ultrawidePrimeInFlight = false
+                        primeUwInFlight = false
                         Log.w(TAG, "Ultrawide prime capture failed: $failure")
                     }
 
                     override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
-                        ultrawidePrimeInFlight = false
+                        primeUwInFlight = false
                     }
                 },
                 handler
             )
         } catch (e: Exception) {
-            ultrawidePrimeInFlight = false
+            primeUwInFlight = false
             Log.w(TAG, "Ultrawide prime capture exception: ${e.message}", e)
         }
     }
@@ -1684,6 +1595,7 @@ class StereoCameraController(
         val exifDt = cap.exifDateTimeOriginal
         val isRaw = cap.isRaw
         val rotationDegrees = cap.rotationDegrees
+        val zoom2xAtCapture = zoom2xEnabled
 
         // Photo sync metrics (for optional toast + optional per-photo JSON log)
         val wideImageTimestampNs: Long? = try { wideImg.timestamp } catch (_: Exception) { null }
@@ -1775,13 +1687,11 @@ class StereoCameraController(
                                 captureId = captureId,
                                 wallTimeMs = wallTimeMs,
                                 isRaw = false,
+                                zoom2xEnabled = zoom2xAtCapture,
                                 widePhysicalId = widePhysicalId,
                                 ultraPhysicalId = ultraPhysicalId,
-                                wideImageUri = wideOutUri,
-                                ultraImageUri = ultraOutUri,
-                                sbsUri = sbsUri,
-                                wideImageTimestampNs = wideImageTimestampNs,
-                                ultraImageTimestampNs = ultraImageTimestampNs,
+                                wideResult = wideResultForMetrics,
+                                ultraResult = ultraResultForMetrics,
                                 metrics = syncMetrics
                             )
                             MediaStoreUtils.finalizePending(resolver, logOutUri)
@@ -1807,13 +1717,11 @@ class StereoCameraController(
                                 captureId = captureId,
                                 wallTimeMs = wallTimeMs,
                                 isRaw = false,
+                                zoom2xEnabled = zoom2xAtCapture,
                                 widePhysicalId = widePhysicalId,
                                 ultraPhysicalId = ultraPhysicalId,
-                                wideImageUri = null,
-                                ultraImageUri = null,
-                                sbsUri = sbsUri,
-                                wideImageTimestampNs = wideImageTimestampNs,
-                                ultraImageTimestampNs = ultraImageTimestampNs,
+                                wideResult = wideResultForMetrics,
+                                ultraResult = ultraResultForMetrics,
                                 metrics = syncMetrics
                             )
                             MediaStoreUtils.finalizePending(resolver, logOutUri)
@@ -1830,7 +1738,7 @@ class StereoCameraController(
                 val sbsOutUri = sbsUri
                 sbsExecutor.execute {
                     try {
-                        val zoom2xForThisSbs = zoom2xEnabled
+                        val zoom2xForThisSbs = zoom2xAtCapture
                         val sbsBytes = StereoSbs.alignAndCreateSbsJpegBytes(
                             wideRight = wideFrame,
                             ultraLeft = ultraFrame,
@@ -1890,13 +1798,11 @@ class StereoCameraController(
                                 captureId = captureId,
                                 wallTimeMs = wallTimeMs,
                                 isRaw = true,
+                                zoom2xEnabled = zoom2xAtCapture,
                                 widePhysicalId = widePhysicalId,
                                 ultraPhysicalId = ultraPhysicalId,
-                                wideImageUri = wideOutUri,
-                                ultraImageUri = ultraOutUri,
-                                sbsUri = null,
-                                wideImageTimestampNs = wideImageTimestampNs,
-                                ultraImageTimestampNs = ultraImageTimestampNs,
+                                wideResult = wideResultForMetrics,
+                                ultraResult = ultraResultForMetrics,
                                 metrics = syncMetrics
                             )
                             MediaStoreUtils.finalizePending(resolver, logOutUri)
@@ -2249,10 +2155,8 @@ class StereoCameraController(
      private fun closeReaders() {
         try { wideReader?.close() } catch (_: Exception) {}
         try { ultraReader?.close() } catch (_: Exception) {}
-        try { ultrawidePrimeReader?.close() } catch (_: Exception) {}
         wideReader = null
         ultraReader = null
-        ultrawidePrimeReader = null
     }
 
     private fun computeOrientationHint(): Int {

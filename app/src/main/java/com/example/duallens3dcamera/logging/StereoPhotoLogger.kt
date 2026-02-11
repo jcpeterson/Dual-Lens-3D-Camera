@@ -2,6 +2,8 @@ package com.example.duallens3dcamera.logging
 
 import android.content.Context
 import android.net.Uri
+import android.graphics.Rect
+import android.hardware.camera2.CaptureResult
 import android.os.Build
 import android.util.JsonWriter
 import java.io.OutputStreamWriter
@@ -12,7 +14,7 @@ import kotlin.math.min
 
 object StereoPhotoLogger {
 
-    private const val SCHEMA_VERSION = 2
+    private const val SCHEMA_VERSION = 3
 
     data class PhotoSyncMetrics(
         val wideSensorTimestampNs: Long,
@@ -147,13 +149,11 @@ object StereoPhotoLogger {
         captureId: String,
         wallTimeMs: Long,
         isRaw: Boolean,
+        zoom2xEnabled: Boolean,
         widePhysicalId: String,
         ultraPhysicalId: String,
-        wideImageUri: Uri?,
-        ultraImageUri: Uri?,
-        sbsUri: Uri?,
-        wideImageTimestampNs: Long?,
-        ultraImageTimestampNs: Long?,
+        wideResult: CaptureResult?,
+        ultraResult: CaptureResult?,
         metrics: PhotoSyncMetrics
     ) {
         val resolver = context.contentResolver
@@ -166,6 +166,7 @@ object StereoPhotoLogger {
                 w.name("captureId").value(captureId)
                 w.name("wallTimeMs").value(wallTimeMs)
                 w.name("isRaw").value(isRaw)
+                w.name("zoom2xEnabled").value(zoom2xEnabled)
 
                 w.name("device").beginObject()
                 w.name("manufacturer").value(Build.MANUFACTURER)
@@ -178,35 +179,20 @@ object StereoPhotoLogger {
                 w.name("ultraPhysicalId").value(ultraPhysicalId)
                 w.endObject()
 
-                // useless
-//                w.name("outputs").beginObject()
-//                w.name("wideImageUri").value(wideImageUri.toString())
-//                w.name("ultraImageUri").value(ultraImageUri.toString())
-//                if (sbsUri != null) w.name("sbsUri").value(sbsUri.toString())
-//                w.endObject()
-
                 w.name("wide").beginObject()
-                // image timestamp is meaningless because I think it's copied from wide
-//                if (wideImageTimestampNs != null) {
-//                    w.name("imageTimestampNs").value(wideImageTimestampNs)
-//                    w.name("imageTimestampMs").value(wideImageTimestampNs / 1_000_000.0)
-//                }
                 w.name("sensorTimestampNs").value(metrics.wideSensorTimestampNs)
                 w.name("sensorTimestampMs").value(metrics.wideSensorTimestampMs())
                 w.name("exposureTimeNs").value(metrics.wideExposureTimeNs)
                 w.name("exposureTimeMs").value(metrics.wideExposureTimeMs())
+                writeLensDiagnostics(w, wideResult)
                 w.endObject()
 
                 w.name("ultra").beginObject()
-                // image timestamp is meaningless because I think it's copied from wide
-//                if (ultraImageTimestampNs != null) {
-//                    w.name("imageTimestampNs").value(ultraImageTimestampNs)
-//                    w.name("imageTimestampMs").value(ultraImageTimestampNs / 1_000_000.0)
-//                }
                 w.name("sensorTimestampNs").value(metrics.ultraSensorTimestampNs)
                 w.name("sensorTimestampMs").value(metrics.ultraSensorTimestampMs())
                 w.name("exposureTimeNs").value(metrics.ultraExposureTimeNs)
                 w.name("exposureTimeMs").value(metrics.ultraExposureTimeMs())
+                writeLensDiagnostics(w, ultraResult)
                 w.endObject()
 
                 w.name("sync").beginObject()
@@ -241,5 +227,175 @@ object StereoPhotoLogger {
                 w.endObject()
             }
         } ?: throw IllegalStateException("openOutputStream failed for $uri")
+    }
+
+    private fun writeLensDiagnostics(w: JsonWriter, result: CaptureResult?) {
+        if (result == null) return
+
+        fun <T> get(key: CaptureResult.Key<T>): T? = try { result.get(key) } catch (_: Exception) { null }
+
+        // Focus
+        val focusDiopters = get(CaptureResult.LENS_FOCUS_DISTANCE)
+        if (focusDiopters != null) {
+            w.name("focusDistanceDiopters").value(focusDiopters.toDouble())
+            val meters = if (focusDiopters > 1e-4f) (1.0 / focusDiopters.toDouble()) else null
+            if (meters != null) w.name("focusDistanceMeters").value(meters)
+        }
+
+        // Lens
+        get(CaptureResult.LENS_STATE)?.let { w.name("lensState").value(lensStateToString(it)) }
+        get(CaptureResult.LENS_FOCAL_LENGTH)?.let { w.name("focalLengthMm").value(it.toDouble()) }
+        get(CaptureResult.LENS_APERTURE)?.let { w.name("apertureFNumber").value(it.toDouble()) }
+        get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE)?.let { w.name("oisMode").value(oisModeToString(it)) }
+
+        // Sensor / exposure
+        get(CaptureResult.SENSOR_SENSITIVITY)?.let { w.name("iso").value(it.toLong()) }
+        get(CaptureResult.SENSOR_FRAME_DURATION)?.let { w.name("frameDurationNs").value(it) }
+        get(CaptureResult.SENSOR_ROLLING_SHUTTER_SKEW)?.let { w.name("rollingShutterSkewNs").value(it) }
+
+        // AF / AE / AWB
+        get(CaptureResult.CONTROL_AF_MODE)?.let { w.name("afMode").value(afModeToString(it)) }
+        get(CaptureResult.CONTROL_AF_STATE)?.let { w.name("afState").value(afStateToString(it)) }
+
+        get(CaptureResult.CONTROL_AE_MODE)?.let { w.name("aeMode").value(aeModeToString(it)) }
+        get(CaptureResult.CONTROL_AE_STATE)?.let { w.name("aeState").value(aeStateToString(it)) }
+        get(CaptureResult.CONTROL_AE_LOCK)?.let { w.name("aeLock").value(it) }
+        get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION)?.let { w.name("exposureCompensation").value(it.toLong()) }
+
+        get(CaptureResult.CONTROL_AWB_MODE)?.let { w.name("awbMode").value(awbModeToString(it)) }
+        get(CaptureResult.CONTROL_AWB_STATE)?.let { w.name("awbState").value(awbStateToString(it)) }
+        get(CaptureResult.CONTROL_AWB_LOCK)?.let { w.name("awbLock").value(it) }
+//        get(CaptureResult.COLOR_CORRECTION_GAINS)?.let { gains ->
+//            w.name("colorGains").beginArray()
+//            w.value(gains.red().toDouble())
+//            w.value(gains.greenEven().toDouble())
+//            w.value(gains.greenOdd().toDouble())
+//            w.value(gains.blue().toDouble())
+//            w.endArray()
+//        }
+
+        // Stabilization (EIS is typically video-only, but log if present)
+        get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)?.let { w.name("eisMode").value(eisModeToString(it)) }
+
+        // Processing modes (helpful for debugging still quality differences)
+        get(CaptureResult.NOISE_REDUCTION_MODE)?.let { w.name("noiseReduction").value(nrModeToString(it)) }
+        get(CaptureResult.EDGE_MODE)?.let { w.name("edgeMode").value(edgeModeToString(it)) }
+        get(CaptureResult.DISTORTION_CORRECTION_MODE)?.let { w.name("distortionCorrection").value(dcModeToString(it)) }
+
+        // Geometry / zoom
+        get(CaptureResult.CONTROL_ZOOM_RATIO)?.let { w.name("zoomRatio").value(it.toDouble()) }
+        get(CaptureResult.SCALER_CROP_REGION)?.let { rect -> writeCropRegion(w, rect) }
+    }
+
+    private fun writeCropRegion(w: JsonWriter, rect: Rect) {
+        w.name("cropRegion").beginObject()
+        w.name("left").value(rect.left.toLong())
+        w.name("top").value(rect.top.toLong())
+        w.name("width").value(rect.width().toLong())
+        w.name("height").value(rect.height().toLong())
+        w.endObject()
+    }
+
+    private fun lensStateToString(v: Int): String = when (v) {
+        CaptureResult.LENS_STATE_STATIONARY -> "stationary"
+        CaptureResult.LENS_STATE_MOVING -> "moving"
+        else -> v.toString()
+    }
+
+    private fun oisModeToString(v: Int): String = when (v) {
+        CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_OFF -> "off"
+        CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON -> "on"
+        else -> v.toString()
+    }
+
+    private fun eisModeToString(v: Int): String = when (v) {
+        CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF -> "off"
+        CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_ON -> "on"
+        else -> v.toString()
+    }
+
+    private fun afModeToString(v: Int): String = when (v) {
+        CaptureResult.CONTROL_AF_MODE_OFF -> "off"
+        CaptureResult.CONTROL_AF_MODE_AUTO -> "auto"
+        CaptureResult.CONTROL_AF_MODE_MACRO -> "macro"
+        CaptureResult.CONTROL_AF_MODE_CONTINUOUS_VIDEO -> "continuous_video"
+        CaptureResult.CONTROL_AF_MODE_CONTINUOUS_PICTURE -> "continuous_picture"
+        CaptureResult.CONTROL_AF_MODE_EDOF -> "edof"
+        else -> v.toString()
+    }
+
+    private fun afStateToString(v: Int): String = when (v) {
+        CaptureResult.CONTROL_AF_STATE_INACTIVE -> "inactive"
+        CaptureResult.CONTROL_AF_STATE_PASSIVE_SCAN -> "passive_scan"
+        CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED -> "passive_focused"
+        CaptureResult.CONTROL_AF_STATE_PASSIVE_UNFOCUSED -> "passive_unfocused"
+        CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN -> "active_scan"
+        CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED -> "focused_locked"
+        CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED -> "not_focused_locked"
+        else -> v.toString()
+    }
+
+    private fun aeModeToString(v: Int): String = when (v) {
+        CaptureResult.CONTROL_AE_MODE_OFF -> "off"
+        CaptureResult.CONTROL_AE_MODE_ON -> "on"
+        CaptureResult.CONTROL_AE_MODE_ON_AUTO_FLASH -> "on_auto_flash"
+        CaptureResult.CONTROL_AE_MODE_ON_ALWAYS_FLASH -> "on_always_flash"
+        CaptureResult.CONTROL_AE_MODE_ON_AUTO_FLASH_REDEYE -> "on_auto_flash_redeye"
+        else -> v.toString()
+    }
+
+    private fun aeStateToString(v: Int): String = when (v) {
+        CaptureResult.CONTROL_AE_STATE_INACTIVE -> "inactive"
+        CaptureResult.CONTROL_AE_STATE_SEARCHING -> "searching"
+        CaptureResult.CONTROL_AE_STATE_CONVERGED -> "converged"
+        CaptureResult.CONTROL_AE_STATE_LOCKED -> "locked"
+        CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED -> "flash_required"
+        CaptureResult.CONTROL_AE_STATE_PRECAPTURE -> "precapture"
+        else -> v.toString()
+    }
+
+    private fun awbModeToString(v: Int): String = when (v) {
+        CaptureResult.CONTROL_AWB_MODE_OFF -> "off"
+        CaptureResult.CONTROL_AWB_MODE_AUTO -> "auto"
+        CaptureResult.CONTROL_AWB_MODE_INCANDESCENT -> "incandescent"
+        CaptureResult.CONTROL_AWB_MODE_FLUORESCENT -> "fluorescent"
+        CaptureResult.CONTROL_AWB_MODE_WARM_FLUORESCENT -> "warm_fluorescent"
+        CaptureResult.CONTROL_AWB_MODE_DAYLIGHT -> "daylight"
+        CaptureResult.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT -> "cloudy_daylight"
+        CaptureResult.CONTROL_AWB_MODE_TWILIGHT -> "twilight"
+        CaptureResult.CONTROL_AWB_MODE_SHADE -> "shade"
+        else -> v.toString()
+    }
+
+    private fun awbStateToString(v: Int): String = when (v) {
+        CaptureResult.CONTROL_AWB_STATE_INACTIVE -> "inactive"
+        CaptureResult.CONTROL_AWB_STATE_SEARCHING -> "searching"
+        CaptureResult.CONTROL_AWB_STATE_CONVERGED -> "converged"
+        CaptureResult.CONTROL_AWB_STATE_LOCKED -> "locked"
+        else -> v.toString()
+    }
+
+    private fun nrModeToString(v: Int): String = when (v) {
+        CaptureResult.NOISE_REDUCTION_MODE_OFF -> "off"
+        CaptureResult.NOISE_REDUCTION_MODE_FAST -> "fast"
+        CaptureResult.NOISE_REDUCTION_MODE_HIGH_QUALITY -> "high_quality"
+        CaptureResult.NOISE_REDUCTION_MODE_MINIMAL -> "minimal"
+        CaptureResult.NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG -> "zero_shutter_lag"
+        else -> v.toString()
+    }
+
+    private fun edgeModeToString(v: Int): String = when (v) {
+        CaptureResult.EDGE_MODE_OFF -> "off"
+        CaptureResult.EDGE_MODE_FAST -> "fast"
+        CaptureResult.EDGE_MODE_HIGH_QUALITY -> "high_quality"
+        CaptureResult.EDGE_MODE_ZERO_SHUTTER_LAG -> "zero_shutter_lag"
+        else -> v.toString()
+    }
+
+    private fun dcModeToString(v: Int): String = when (v) {
+        CaptureResult.DISTORTION_CORRECTION_MODE_OFF -> "off"
+        CaptureResult.DISTORTION_CORRECTION_MODE_FAST -> "fast"
+        CaptureResult.DISTORTION_CORRECTION_MODE_HIGH_QUALITY -> "high_quality"
+        else -> v.toString()
     }
 }

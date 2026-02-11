@@ -20,10 +20,11 @@
             android:title="Edge mode"
             android:defaultValue="off" />
 
-        <ListPreference
-            android:key="photo_ultrawide_prime_interval"
-            android:title="Ultrawide priming interval"
-            android:defaultValue="off" />
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="photo_prime_uw_on_active"
+            android:title="Prime UW when camera becomes active"
+            android:summary="Workaround for some Pixel phones with ultrawide autofocus: performs one discarded ultrawide capture when the camera starts to avoid a blurry first photo."
+            android:defaultValue="false" />
 
         <androidx.preference.SwitchPreferenceCompat
             android:key="photo_save_individual_images"
