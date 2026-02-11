@@ -45,8 +45,6 @@ object AppSettings {
     // New (simple on/off): prime ultrawide once when the camera becomes active.
     const val KEY_PHOTO_PRIME_UW_ON_ACTIVE = "photo_prime_uw_on_active"
 
-    // Legacy key (string interval dropdown) kept only for migrating older installs.
-    private const val KEY_PHOTO_ULTRAWIDE_PRIME_INTERVAL_LEGACY = "photo_ultrawide_prime_interval"
     // Whether or not to save the two images separately on top of the sbs output
     // Note: Applies in JPG mode only (RAW mode always provides two dng files and not sbs)
     const val KEY_PHOTO_SAVE_INDIVIDUAL_IMAGES = "photo_save_individual_images"
@@ -421,12 +419,8 @@ object AppSettings {
         }
 
         // default: ultrawide priming is OFF
-        // If upgrading from an older build that used an interval dropdown, treat any non-off value as enabled.
         if (!sp.contains(KEY_PHOTO_PRIME_UW_ON_ACTIVE)) {
-            val legacy = sp.getString(KEY_PHOTO_ULTRAWIDE_PRIME_INTERVAL_LEGACY, "off") ?: "off"
-            val enabled = legacy != "off"
-            editor.putBoolean(KEY_PHOTO_PRIME_UW_ON_ACTIVE, enabled)
-            changed = true
+            editor.putBoolean(KEY_PHOTO_PRIME_UW_ON_ACTIVE, false); changed = true
         }
 
         // Video processing defaults (recording only).

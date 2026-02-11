@@ -1191,6 +1191,9 @@ class StereoCameraController(
 
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                 set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                // Try to avoid a visible WB "pulse" in the main preview when priming runs.
+                // (On some devices, AWB is shared across the logical camera.)
+                try { set(CaptureRequest.CONTROL_AWB_LOCK, true) } catch (_: Exception) {}
 
                 // Keep this as close to a still capture as possible, but don't constrain FPS here.
                 applyCommonNoCropNoStab(this, isVideo = false, targetFps = previewTargetFps, applyFpsRange = false)
@@ -1469,6 +1472,7 @@ class StereoCameraController(
                 set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
 
                 applyCommonNoCropNoStab(this, isVideo = false, targetFps = previewTargetFps, applyFpsRange = false)
+                applyStillOisIfSupported(this)
                 applyTorch(this)
 
             }
@@ -2073,6 +2077,44 @@ class StereoCameraController(
         return candidates.minWithOrNull(
             compareBy<Range<Int>> { it.upper - it.lower }.thenBy { it.lower }
         ) ?: candidates.first()
+    }
+
+
+    private fun supportsOis(chars: CameraCharacteristics?): Boolean {
+        val modes = chars?.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: return false
+        return modes.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+    }
+
+    private fun applyStillOisIfSupported(builder: CaptureRequest.Builder) {
+        // For still photos, OIS can reduce blur (when the device/lens supports it).
+        // Keep preview/video stabilization behavior unchanged elsewhere.
+
+        try {
+            if (supportsOis(logicalChars)) {
+                builder.set(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+                )
+            }
+        } catch (_: Exception) {
+        }
+
+        if (supportsOis(wideChars)) {
+            setPhysical(
+                builder,
+                widePhysicalId,
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+            )
+        }
+        if (supportsOis(ultraChars)) {
+            setPhysical(
+                builder,
+                ultraPhysicalId,
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+            )
+        }
     }
 
     private fun applyCommonNoCropNoStab(builder: CaptureRequest.Builder, isVideo: Boolean, targetFps: Int, applyFpsRange: Boolean = true) {

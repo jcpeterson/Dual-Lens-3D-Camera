@@ -265,14 +265,17 @@ object StereoPhotoLogger {
         get(CaptureResult.CONTROL_AWB_MODE)?.let { w.name("awbMode").value(awbModeToString(it)) }
         get(CaptureResult.CONTROL_AWB_STATE)?.let { w.name("awbState").value(awbStateToString(it)) }
         get(CaptureResult.CONTROL_AWB_LOCK)?.let { w.name("awbLock").value(it) }
-//        get(CaptureResult.COLOR_CORRECTION_GAINS)?.let { gains ->
-//            w.name("colorGains").beginArray()
-//            w.value(gains.red().toDouble())
-//            w.value(gains.greenEven().toDouble())
-//            w.value(gains.greenOdd().toDouble())
-//            w.value(gains.blue().toDouble())
-//            w.endArray()
-//        }
+
+        // Useful for diagnosing white balance / "warmth" shifts between lenses or between shots.
+        get(CaptureResult.COLOR_CORRECTION_MODE)?.let { w.name("colorCorrectionMode").value(colorCorrectionModeToString(it)) }
+        get(CaptureResult.COLOR_CORRECTION_GAINS)?.let { gains ->
+            w.name("awbColorGainsRggb").beginArray()
+            w.value(gains.red.toDouble())
+            w.value(gains.greenEven.toDouble())
+            w.value(gains.greenOdd.toDouble())
+            w.value(gains.blue.toDouble())
+            w.endArray()
+        }
 
         // Stabilization (EIS is typically video-only, but log if present)
         get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)?.let { w.name("eisMode").value(eisModeToString(it)) }
@@ -372,6 +375,14 @@ object StereoPhotoLogger {
         CaptureResult.CONTROL_AWB_STATE_SEARCHING -> "searching"
         CaptureResult.CONTROL_AWB_STATE_CONVERGED -> "converged"
         CaptureResult.CONTROL_AWB_STATE_LOCKED -> "locked"
+        else -> v.toString()
+    }
+
+
+    private fun colorCorrectionModeToString(v: Int): String = when (v) {
+        CaptureResult.COLOR_CORRECTION_MODE_FAST -> "fast"
+        CaptureResult.COLOR_CORRECTION_MODE_HIGH_QUALITY -> "high_quality"
+        CaptureResult.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX -> "transform_matrix"
         else -> v.toString()
     }
 
