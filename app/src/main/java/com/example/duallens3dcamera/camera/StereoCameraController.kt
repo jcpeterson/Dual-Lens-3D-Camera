@@ -1472,7 +1472,6 @@ class StereoCameraController(
                 set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
 
                 applyCommonNoCropNoStab(this, isVideo = false, targetFps = previewTargetFps, applyFpsRange = false)
-                applyStillOisIfSupported(this)
                 applyTorch(this)
 
             }
@@ -2085,9 +2084,9 @@ class StereoCameraController(
         return modes.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
     }
 
-    private fun applyStillOisIfSupported(builder: CaptureRequest.Builder) {
-        // For still photos, OIS can reduce blur (when the device/lens supports it).
-        // Keep preview/video stabilization behavior unchanged elsewhere.
+    private fun applyOisAlwaysOnIfSupported(builder: CaptureRequest.Builder) {
+        // OIS: always request ON (where supported).
+        // Note: some lenses (e.g., Pixel 7 Pro ultrawide) have no OIS and will remain off.
 
         try {
             if (supportsOis(logicalChars)) {
@@ -2125,20 +2124,15 @@ class StereoCameraController(
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
             )
-            builder.set(
-                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
-                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
-            )
         } else {
             builder.set(
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
             )
-            builder.set(
-                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
-                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
-            )
         }
+
+        // OIS is always requested ON (where supported).
+        applyOisAlwaysOnIfSupported(builder)
 
         if (applyFpsRange) {
 
