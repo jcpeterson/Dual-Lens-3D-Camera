@@ -1395,7 +1395,6 @@ class StereoCameraController(
             return
         }
 
-//        val jpegOrientation = computeJpegOrientation()
         val samsungMode = !phoneIsAPixel
         val preview = previewSurface
 
@@ -1876,11 +1875,6 @@ class StereoCameraController(
                 exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, exifDateTimeOriginal)
                 exif.setAttribute(ExifInterface.TAG_DATETIME_DIGITIZED, exifDateTimeOriginal)
                 exif.setAttribute(ExifInterface.TAG_DATETIME, exifDateTimeOriginal)
-
-                // For DNG: ensure viewers rotate correctly
-                if (orientation != null && orientation != PlatformExif.ORIENTATION_UNDEFINED) {
-                    exif.setAttribute(ExifInterface.TAG_ORIENTATION, orientation.toString())
-                }
 
                 exif.saveAttributes()
             }
