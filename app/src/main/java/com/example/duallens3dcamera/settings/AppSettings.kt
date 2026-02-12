@@ -42,6 +42,10 @@ object AppSettings {
     const val KEY_PHOTO_NOISE_REDUCTION = "photo_noise_reduction"
     const val KEY_PHOTO_DISTORTION_CORRECTION = "photo_distortion_correction"
     const val KEY_PHOTO_EDGE_MODE = "photo_edge_mode"
+    // Still capture resolution behavior (affects wide/ultrawide still ImageReader sizes)
+    // "common" (default) -> use the largest resolution supported by both lenses
+    // "per_lens" -> use the largest resolution for each lens independently
+    const val KEY_PHOTO_STILL_RESOLUTION_MODE = "photo_still_resolution_mode"
     // New (simple on/off): prime ultrawide once when the camera becomes active.
     const val KEY_PHOTO_PRIME_UW_ON_ACTIVE = "photo_prime_uw_on_active"
 
@@ -156,6 +160,10 @@ object AppSettings {
             "hq" -> CaptureRequest.EDGE_MODE_HIGH_QUALITY
             else -> CaptureRequest.EDGE_MODE_OFF
         }
+    }
+
+    fun getPhotoStillResolutionMode(context: Context): String {
+        return prefs(context).getString(KEY_PHOTO_STILL_RESOLUTION_MODE, "common") ?: "common"
     }
 
     fun getPhotoSaveIndividualImages(context: Context): Boolean =
@@ -412,6 +420,11 @@ object AppSettings {
         }
         if (!sp.contains(KEY_PHOTO_EDGE_MODE)) {
             editor.putString(KEY_PHOTO_EDGE_MODE, "off"); changed = true
+        }
+
+        // default: match wide+ultrawide still sizes to the largest common resolution (best sync)
+        if (!sp.contains(KEY_PHOTO_STILL_RESOLUTION_MODE)) {
+            editor.putString(KEY_PHOTO_STILL_RESOLUTION_MODE, "common"); changed = true
         }
         // default: in JPG mode, output only SBS, no individual images
         if (!sp.contains(KEY_PHOTO_SAVE_INDIVIDUAL_IMAGES)) {

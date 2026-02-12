@@ -51,6 +51,8 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
     private var photoDistortionCorrectionMode: Int =
         CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
     private var photoEdgeMode: Int = CaptureRequest.EDGE_MODE_OFF
+    private var photoStillResolutionMode: StereoCameraController.StillResolutionMode =
+        StereoCameraController.StillResolutionMode.LARGEST_COMMON
     // Whether or not to save the two images separately on top of the sbs output
     // Note: Applies in JPG mode only (RAW mode always provides two dng files and not sbs)
     private var saveIndividualLensImages: Boolean = false
@@ -275,7 +277,8 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
                 photo = StereoCameraController.PhotoTuning(
                     noiseReductionMode = photoNoiseReductionMode,
                     distortionCorrectionMode = photoDistortionCorrectionMode,
-                    edgeMode = photoEdgeMode
+                    edgeMode = photoEdgeMode,
+                    stillResolutionMode = photoStillResolutionMode
                 )
             )
         )
@@ -393,6 +396,9 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         photoNoiseReductionMode = AppSettings.getPhotoNoiseReductionMode(this)
         photoDistortionCorrectionMode = AppSettings.getPhotoDistortionCorrectionMode(this)
         photoEdgeMode = AppSettings.getPhotoEdgeMode(this)
+        photoStillResolutionMode = StereoCameraController.StillResolutionMode.fromPrefValue(
+            AppSettings.getPhotoStillResolutionMode(this)
+        )
         saveIndividualLensImages = AppSettings.getPhotoSaveIndividualImages(this)
 
         // Settings-only configs that the controller reads later (recording/stills),

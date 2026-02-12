@@ -43,9 +43,52 @@ object SizeSelector {
         return candidates.maxBy { it.width.toLong() * it.height.toLong() }
     }
 
+    /**
+     * Chooses the largest YUV_420_888 size that is supported by BOTH cameras.
+     * Prefers 4:3 when available.
+     */
+    fun chooseLargestCommonYuvFourByThree(
+        wideMap: StreamConfigurationMap,
+        ultraMap: StreamConfigurationMap
+    ): Size? {
+        val wideSizes = (wideMap.getOutputSizes(ImageFormat.YUV_420_888) ?: emptyArray()).toList()
+        val ultraSizes = (ultraMap.getOutputSizes(ImageFormat.YUV_420_888) ?: emptyArray()).toList()
+        if (wideSizes.isEmpty() || ultraSizes.isEmpty()) {
+            return null
+        }
+
+        val ultraSet = ultraSizes.map { it.width to it.height }.toSet()
+        val common = wideSizes.filter { ultraSet.contains(it.width to it.height) }
+        if (common.isEmpty()) {
+            Log.w(TAG, "No common YUV sizes found between wide and ultrawide.")
+            return null
+        }
+
+        val fourByThree = common.filter { isFourByThree(it) }
+        val candidates = if (fourByThree.isNotEmpty()) fourByThree else common
+        return candidates.maxBy { it.width.toLong() * it.height.toLong() }
+    }
+
     fun chooseLargestRaw(map: StreamConfigurationMap): Size? {
         val sizes = map.getOutputSizes(ImageFormat.RAW_SENSOR) ?: return null
         return sizes.maxByOrNull { it.width.toLong() * it.height.toLong() }
+    }
+
+    /**
+     * Chooses the largest RAW_SENSOR size that is supported by BOTH cameras.
+     * Returns null if either camera doesn't support RAW, or if there is no common size.
+     */
+    fun chooseLargestCommonRaw(
+        wideMap: StreamConfigurationMap,
+        ultraMap: StreamConfigurationMap
+    ): Size? {
+        val wideSizes = (wideMap.getOutputSizes(ImageFormat.RAW_SENSOR) ?: return null).toList()
+        val ultraSizes = (ultraMap.getOutputSizes(ImageFormat.RAW_SENSOR) ?: return null).toList()
+        if (wideSizes.isEmpty() || ultraSizes.isEmpty()) return null
+
+        val ultraSet = ultraSizes.map { it.width to it.height }.toSet()
+        val common = wideSizes.filter { ultraSet.contains(it.width to it.height) }
+        return common.maxByOrNull { it.width.toLong() * it.height.toLong() }
     }
 
     fun chooseCommonPrivateSizeAtFps(

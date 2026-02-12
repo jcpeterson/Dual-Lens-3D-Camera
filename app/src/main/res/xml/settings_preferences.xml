@@ -6,6 +6,11 @@
         android:title="Photo settings">
 
         <ListPreference
+            android:key="photo_still_resolution_mode"
+            android:title="Still capture resolution"
+            android:defaultValue="common" />
+
+        <ListPreference
             android:key="photo_noise_reduction"
             android:title="Noise reduction"
             android:defaultValue="off" />

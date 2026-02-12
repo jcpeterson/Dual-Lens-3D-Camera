@@ -72,10 +72,28 @@ class StereoCameraController(
         val previewTargetFps: Int
     )
 
+    enum class StillResolutionMode(val prefValue: String) {
+        /** Use the largest still size available to each lens independently. */
+        LARGEST_PER_LENS("per_lens"),
+
+        /** Use the largest still size that is supported by BOTH lenses (best for sync). */
+        LARGEST_COMMON("common");
+
+        companion object {
+            fun fromPrefValue(value: String?): StillResolutionMode {
+                return when (value) {
+                    LARGEST_PER_LENS.prefValue -> LARGEST_PER_LENS
+                    else -> LARGEST_COMMON
+                }
+            }
+        }
+    }
+
     data class PhotoTuning(
         val noiseReductionMode: Int,
         val distortionCorrectionMode: Int,
-        val edgeMode: Int
+        val edgeMode: Int,
+        val stillResolutionMode: StillResolutionMode = StillResolutionMode.LARGEST_COMMON
     )
 
     data class StartParams(
@@ -207,6 +225,7 @@ class StereoCameraController(
     private var photoDistortionCorrectionMode: Int =
         CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
     private var photoEdgeMode: Int = CaptureRequest.EDGE_MODE_OFF
+    private var photoStillResolutionMode: StillResolutionMode = StillResolutionMode.LARGEST_COMMON
 
     // video processing (settings) -- applied to RECORDING only; preview is forced OFF.
     private var videoNoiseReductionMode: Int = CaptureRequest.NOISE_REDUCTION_MODE_OFF
@@ -295,6 +314,7 @@ class StereoCameraController(
         this.photoNoiseReductionMode = params.photo.noiseReductionMode
         this.photoDistortionCorrectionMode = params.photo.distortionCorrectionMode
         this.photoEdgeMode = params.photo.edgeMode
+        this.photoStillResolutionMode = params.photo.stillResolutionMode
 
         this.zoom2xEnabled = params.zoom2xEnabled
         // We'll pick the correct wide physical ID in selectCharacteristicsAndSizes() after LensDiscovery runs.
@@ -435,6 +455,49 @@ class StereoCameraController(
         )
     }
 
+    private fun recomputeStillSizesLocked() {
+        val wMap = wideMap ?: return
+        val uMap = ultraMap ?: return
+
+        when (photoStillResolutionMode) {
+            StillResolutionMode.LARGEST_COMMON -> {
+                val commonYuv = SizeSelector.chooseLargestCommonYuvFourByThree(wMap, uMap)
+                if (commonYuv != null) {
+                    yuvWideSize = commonYuv
+                    yuvUltraSize = commonYuv
+                } else {
+                    // If there is no intersection, we have no choice but to fall back to per-lens.
+                    yuvWideSize = SizeSelector.chooseLargestYuvFourByThree(wMap)
+                    yuvUltraSize = SizeSelector.chooseLargestYuvFourByThree(uMap)
+                    callback.onFallbackSizeUsed(
+                        "No common still YUV size found; using largest-per-lens still sizes instead."
+                    )
+                }
+
+                val commonRaw = SizeSelector.chooseLargestCommonRaw(wMap, uMap)
+                if (commonRaw != null) {
+                    rawWideSize = commonRaw
+                    rawUltraSize = commonRaw
+                } else {
+                    rawWideSize = SizeSelector.chooseLargestRaw(wMap)
+                    rawUltraSize = SizeSelector.chooseLargestRaw(uMap)
+                }
+            }
+
+            StillResolutionMode.LARGEST_PER_LENS -> {
+                yuvWideSize = SizeSelector.chooseLargestYuvFourByThree(wMap)
+                yuvUltraSize = SizeSelector.chooseLargestYuvFourByThree(uMap)
+                rawWideSize = SizeSelector.chooseLargestRaw(wMap)
+                rawUltraSize = SizeSelector.chooseLargestRaw(uMap)
+            }
+        }
+
+        Log.i(
+            TAG,
+            "Still sizes (${photoStillResolutionMode.name}): YUV wide=$yuvWideSize ultra=$yuvUltraSize; RAW wide=$rawWideSize ultra=$rawUltraSize"
+        )
+    }
+
     fun stop() {
         val handler = cameraHandler ?: return
 
@@ -566,10 +629,7 @@ class StereoCameraController(
             if (wMap != null && uMap != null) {
                 recomputeRecordSizeLocked()
                 recomputePreviewSizeLocked()
-                yuvWideSize = SizeSelector.chooseLargestYuvFourByThree(wMap)
-                yuvUltraSize = SizeSelector.chooseLargestYuvFourByThree(uMap)
-                rawWideSize = SizeSelector.chooseLargestRaw(wMap)
-                rawUltraSize = SizeSelector.chooseLargestRaw(uMap)
+                recomputeStillSizesLocked()
             }
 
             if (cameraDevice != null && previewSurface != null) {
@@ -1002,19 +1062,14 @@ class StereoCameraController(
 
         wideMap = wide.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         ultraMap = ultra.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        val wMap = requireNotNull(wideMap)
-        val uMap = requireNotNull(ultraMap)
+        // Ensure the stream configuration maps exist. The app cannot operate without them.
+        requireNotNull(wideMap)
+        requireNotNull(ultraMap)
 
         recomputeRecordSizeLocked()
         recomputePreviewSizeLocked()
 
-        yuvWideSize = SizeSelector.chooseLargestYuvFourByThree(wMap)
-        yuvUltraSize = SizeSelector.chooseLargestYuvFourByThree(uMap)
-        Log.i(TAG, "YUV wide=${yuvWideSize}, ultra=${yuvUltraSize}")
-
-        rawWideSize = SizeSelector.chooseLargestRaw(wMap)
-        rawUltraSize = SizeSelector.chooseLargestRaw(uMap)
-        Log.i(TAG, "RAW wide=${rawWideSize}, ultra=${rawUltraSize}")
+        recomputeStillSizesLocked()
 
     }
 

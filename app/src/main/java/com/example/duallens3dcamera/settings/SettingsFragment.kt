@@ -39,9 +39,14 @@ class SettingsFragment : PreferenceFragmentCompat() {
     }
 
     private fun setupPhotoPrefs() {
+        val stillRes = findPreference<ListPreference>(AppSettings.KEY_PHOTO_STILL_RESOLUTION_MODE)
         val noise = findPreference<ListPreference>(AppSettings.KEY_PHOTO_NOISE_REDUCTION) ?: return
         val dist = findPreference<ListPreference>(AppSettings.KEY_PHOTO_DISTORTION_CORRECTION) ?: return
         val edge = findPreference<ListPreference>(AppSettings.KEY_PHOTO_EDGE_MODE) ?: return
+
+        stillRes?.entries = arrayOf("Largest Per Lens", "Largest Common")
+        stillRes?.entryValues = arrayOf("per_lens", "common")
+        stillRes?.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
 
         noise.entries = arrayOf("Off", "Fast", "High quality")
         noise.entryValues = arrayOf("off", "fast", "hq")
