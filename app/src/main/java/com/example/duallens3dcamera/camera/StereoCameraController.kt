@@ -2074,9 +2074,7 @@ class StereoCameraController(
         }
     }
 
-    private fun chooseAeFpsRange(chars: CameraCharacteristics?, desiredFps: Int): Range<Int>? {
-        val ranges = chars?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
-
+    private fun chooseAeFpsRangeFromList(ranges: List<Range<Int>>, desiredFps: Int): Range<Int>? {
         // Prefer a locked range if the device exposes it.
         ranges.firstOrNull { it.lower == desiredFps && it.upper == desiredFps }?.let { return it }
 
@@ -2090,6 +2088,36 @@ class StereoCameraController(
         return candidates.minWithOrNull(
             compareBy<Range<Int>> { it.upper - it.lower }.thenBy { it.lower }
         ) ?: candidates.first()
+    }
+
+    private fun chooseAeFpsRange(chars: CameraCharacteristics?, desiredFps: Int): Range<Int>? {
+        val ranges =
+            chars?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)?.toList()
+                ?: return null
+
+        return chooseAeFpsRangeFromList(ranges, desiredFps)
+    }
+
+    /**
+     * Choose a single AE FPS range that is supported by BOTH the active wide physical camera
+     * and the active ultrawide physical camera.
+     *
+     * This is important when streaming two physical cameras at once (recording), since
+     * requesting different AE FPS ranges per physical camera can create conflicting constraints.
+     */
+    private fun chooseCommonAeFpsRange(desiredFps: Int): Range<Int>? {
+        val wideRanges =
+            wideChars?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)?.toList()
+                ?: return null
+        val ultraRanges =
+            ultraChars?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)?.toList()
+                ?: return null
+
+        val ultraSet = ultraRanges.map { it.lower to it.upper }.toSet()
+        val common = wideRanges.filter { ultraSet.contains(it.lower to it.upper) }
+        if (common.isEmpty()) return null
+
+        return chooseAeFpsRangeFromList(common, desiredFps)
     }
 
 
@@ -2149,30 +2177,26 @@ class StereoCameraController(
         applyOisAlwaysOnIfSupported(builder)
 
         if (applyFpsRange) {
+            // AE target FPS range.
+            //
+            // For dual-physical streaming (recording), pick a SINGLE range that both lenses support.
+            // For preview (single physical stream), prefer the active wide lens.
+            val fpsRange =
+                if (isVideo) {
+                    chooseCommonAeFpsRange(targetFps)
+                        ?: chooseAeFpsRange(logicalChars, targetFps)
+                } else {
+                    chooseAeFpsRange(wideChars, targetFps)
+                        ?: chooseAeFpsRange(logicalChars, targetFps)
+                        ?: chooseAeFpsRange(ultraChars, targetFps)
+                }
 
-        // Target FPS (logical + per-physical best effort)
-        val logicalRange =
-            chooseAeFpsRange(logicalChars, targetFps)
-                ?: chooseAeFpsRange(wideChars, targetFps)
-                ?: chooseAeFpsRange(ultraChars, targetFps)
-
-        if (logicalRange != null) {
-            try {
-                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, logicalRange)
-            } catch (_: Exception) {
+            if (fpsRange != null) {
+                try {
+                    builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+                } catch (_: Exception) {
+                }
             }
-        }
-
-        val wideRange = chooseAeFpsRange(wideChars, targetFps) ?: logicalRange
-        if (wideRange != null) {
-            setPhysical(builder, widePhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, wideRange)
-        }
-
-        val ultraRange = chooseAeFpsRange(ultraChars, targetFps) ?: logicalRange
-        if (ultraRange != null) {
-            setPhysical(builder, ultraPhysicalId, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, ultraRange)
-        }
-
         }
 
         builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
