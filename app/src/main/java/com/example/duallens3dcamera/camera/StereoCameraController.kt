@@ -1856,6 +1856,10 @@ class StereoCameraController(
             val wideOutUri = requireNotNull(wideUri) { "Raw capture requires wideUri" }
             val ultraOutUri = requireNotNull(ultraUri) { "Raw capture requires ultraUri" }
             val total = requireNotNull(totalResultNullable)
+            // Use the per-physical CaptureResult when available so each DNG gets correct AWB/CCM/etc.
+            // Fall back to the logical TotalCaptureResult if physical results are missing or incomplete.
+            val wideResultForDng = wideResultForMetrics ?: total
+            val ultraResultForDng = ultraResultForMetrics ?: total
             val dngOrientation = exifOrientationFromDegrees(rotationDegrees)
 
             ioExecutor.execute {
@@ -1865,28 +1869,62 @@ class StereoCameraController(
 
                     // Write wide DNG, then close wide Image immediately.
                     try {
-                        DngWriter.writeDng(
-                            context = context,
-                            uri = wideOutUri,
-                            characteristics = wideCharacteristics,
-                            result = total,
-                            image = wideImg,
-                            orientation = dngOrientation
-                        )
+                        try {
+                            DngWriter.writeDng(
+                                context = context,
+                                uri = wideOutUri,
+                                characteristics = wideCharacteristics,
+                                result = wideResultForDng,
+                                image = wideImg,
+                                orientation = dngOrientation
+                            )
+                        } catch (e: Exception) {
+                            // Some devices may omit keys in physical results; retry with logical metadata.
+                            if (wideResultForDng !== total) {
+                                Log.w(TAG, "Wide DNG write failed with physical metadata; retrying with logical metadata: ${e.message}")
+                                DngWriter.writeDng(
+                                    context = context,
+                                    uri = wideOutUri,
+                                    characteristics = wideCharacteristics,
+                                    result = total,
+                                    image = wideImg,
+                                    orientation = dngOrientation
+                                )
+                            } else {
+                                throw e
+                            }
+                        }
                     } finally {
                         try { wideImg.close() } catch (_: Exception) {}
                     }
 
                     // Write ultra DNG, then close ultra Image immediately.
                     try {
-                        DngWriter.writeDng(
-                            context = context,
-                            uri = ultraOutUri,
-                            characteristics = ultraCharacteristics,
-                            result = total,
-                            image = ultraImg,
-                            orientation = dngOrientation
-                        )
+                        try {
+                            DngWriter.writeDng(
+                                context = context,
+                                uri = ultraOutUri,
+                                characteristics = ultraCharacteristics,
+                                result = ultraResultForDng,
+                                image = ultraImg,
+                                orientation = dngOrientation
+                            )
+                        } catch (e: Exception) {
+                            // Some devices may omit keys in physical results; retry with logical metadata.
+                            if (ultraResultForDng !== total) {
+                                Log.w(TAG, "Ultra DNG write failed with physical metadata; retrying with logical metadata: ${e.message}")
+                                DngWriter.writeDng(
+                                    context = context,
+                                    uri = ultraOutUri,
+                                    characteristics = ultraCharacteristics,
+                                    result = total,
+                                    image = ultraImg,
+                                    orientation = dngOrientation
+                                )
+                            } else {
+                                throw e
+                            }
+                        }
                     } finally {
                         try { ultraImg.close() } catch (_: Exception) {}
                     }

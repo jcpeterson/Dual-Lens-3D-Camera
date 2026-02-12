@@ -3,7 +3,7 @@ package com.example.duallens3dcamera.media
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.DngCreator
-import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.CaptureResult
 import android.media.Image
 import android.net.Uri
 import android.util.Log
@@ -21,7 +21,7 @@ object DngWriter {
         context: Context,
         uri: Uri,
         characteristics: CameraCharacteristics,
-        result: TotalCaptureResult,
+        result: CaptureResult,
         image: Image,
         orientation: Int? = null
     ) {
