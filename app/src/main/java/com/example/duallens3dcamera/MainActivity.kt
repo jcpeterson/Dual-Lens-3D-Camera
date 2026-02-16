@@ -51,6 +51,9 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
     private var photoDistortionCorrectionMode: Int =
         CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
     private var photoEdgeMode: Int = CaptureRequest.EDGE_MODE_OFF
+    private var photoToneMapping: StereoCameraController.ToneMapping =
+        StereoCameraController.ToneMapping.AUTO
+    private var photoTonemapAeCompSteps: Int = 0
     private var photoStillResolutionMode: StereoCameraController.StillResolutionMode =
         StereoCameraController.StillResolutionMode.LARGEST_COMMON
     // Whether or not to save the two images separately on top of the sbs output
@@ -278,6 +281,8 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
                     noiseReductionMode = photoNoiseReductionMode,
                     distortionCorrectionMode = photoDistortionCorrectionMode,
                     edgeMode = photoEdgeMode,
+                    toneMapping = photoToneMapping,
+                    toneMapAeCompensationSteps = photoTonemapAeCompSteps,
                     stillResolutionMode = photoStillResolutionMode
                 )
             )
@@ -396,6 +401,10 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         photoNoiseReductionMode = AppSettings.getPhotoNoiseReductionMode(this)
         photoDistortionCorrectionMode = AppSettings.getPhotoDistortionCorrectionMode(this)
         photoEdgeMode = AppSettings.getPhotoEdgeMode(this)
+        photoToneMapping = StereoCameraController.ToneMapping.fromPrefValue(
+            AppSettings.getPhotoToneMapping(this)
+        )
+        photoTonemapAeCompSteps = AppSettings.getPhotoTonemapAeCompSteps(this)
         photoStillResolutionMode = StereoCameraController.StillResolutionMode.fromPrefValue(
             AppSettings.getPhotoStillResolutionMode(this)
         )

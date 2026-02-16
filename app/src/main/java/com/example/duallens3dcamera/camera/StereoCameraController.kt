@@ -13,6 +13,7 @@ import android.media.ExifInterface as PlatformExif
 import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.util.Range
 import android.util.Size
@@ -34,6 +35,7 @@ import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import android.hardware.camera2.params.MeteringRectangle
+import android.hardware.camera2.params.TonemapCurve
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CaptureRequest
@@ -89,10 +91,51 @@ class StereoCameraController(
         }
     }
 
+
+
+    enum class ToneMapping(val prefValue: String) {
+        /** Do not set any TONEMAP keys (preserve existing device/default behavior). */
+        AUTO("auto"),
+
+        /** Request a global tone curve (sRGB-ish, best-effort) to discourage local/HDR tonemapping. */
+        LINEAR("linear"),
+
+        /** Request a gentle global S-curve (best-effort), similar to a mild mirrorless JPEG curve. */
+        S_CURVE_WEAK("s_curve_weak"),
+
+        /** Mild S-curve (legacy value: "s_curve"). */
+        S_CURVE("s_curve"),
+
+        /** Stronger S-curve (more contrast). */
+        S_CURVE_STRONG("s_curve_strong");
+
+        companion object {
+            fun fromPrefValue(value: String?): ToneMapping {
+                return when (value) {
+                    LINEAR.prefValue -> LINEAR
+                    S_CURVE_WEAK.prefValue -> S_CURVE_WEAK
+                    S_CURVE.prefValue -> S_CURVE
+                    S_CURVE_STRONG.prefValue -> S_CURVE_STRONG
+                    else -> AUTO
+                }
+            }
+        }
+    }
+
     data class PhotoTuning(
         val noiseReductionMode: Int,
         val distortionCorrectionMode: Int,
         val edgeMode: Int,
+        val toneMapping: ToneMapping = ToneMapping.AUTO,
+        /**
+         * AE exposure compensation in camera-native "steps".
+         *
+         * This biases auto-exposure (AE) but does NOT disable 3A.
+         *
+         * IMPORTANT: This app only applies the value when [toneMapping] != AUTO,
+         * so the default "Auto" tone mapping mode preserves previous behavior 100%.
+         */
+        val toneMapAeCompensationSteps: Int = 0,
         val stillResolutionMode: StillResolutionMode = StillResolutionMode.LARGEST_COMMON
     )
 
@@ -147,6 +190,59 @@ class StereoCameraController(
         private const val DEFAULT_STEREO_LOG_FRAMES_ONLY = false // frameNumber and SENSOR_TIMESTAMP only for video logs
         private const val DEFAULT_ENABLE_PHOTO_JSON_LOG = false
         private const val DEFAULT_ENABLE_PHOTO_SYNC_TOAST = false
+
+        // Tone map curves (best-effort). These are global curves intended to discourage
+        // vendor/local tonemapping without touching auto-exposure/3A.
+        //
+        // NOTE: If you set TONEMAP_MODE_CONTRAST_CURVE, you are taking over the *entire* tonemap,
+        // including the normal display gamma. An identity curve will therefore look very dark.
+        // To keep "normal" brightness while still discouraging local/HDR tonemapping, we use an
+        // sRGB-like global curve for LINEAR, and a very mild S-curve variant for S_CURVE.
+        private const val TONEMAP_CURVE_SAMPLES_FINE = 32
+        private const val TONEMAP_CURVE_SAMPLES_COARSE = 16
+
+        // S-curve strength presets (amount of smoothstep mixed into the sRGB output curve).
+        private const val S_CURVE_AMOUNT_WEAK = 0.10f
+        private const val S_CURVE_AMOUNT_MILD = 0.18f
+        private const val S_CURVE_AMOUNT_STRONG = 0.30f
+
+        private fun buildTonemapCurve(samples: Int, mapper: (Float) -> Float): TonemapCurve {
+            val n = samples.coerceAtLeast(2)
+            val pts = FloatArray(n * 2)
+            for (i in 0 until n) {
+                val x = i.toFloat() / (n - 1).toFloat()
+                val y = mapper(x).coerceIn(0.0f, 1.0f)
+                pts[i * 2] = x
+                pts[i * 2 + 1] = y
+            }
+            return TonemapCurve(pts, pts, pts)
+        }
+
+        // sRGB transfer function (OETF) from linear scene values to display-ready values.
+        private fun srgbOetf(x: Float): Float {
+            return if (x <= 0.0031308f) {
+                12.92f * x
+            } else {
+                (1.055f * Math.pow(x.toDouble(), (1.0 / 2.4)).toFloat()) - 0.055f
+            }
+        }
+
+        // Gentle S-curve in the *display* domain (after sRGB), to mimic a mild "camera JPEG" curve.
+        private fun sCurveDisplay(x: Float, amount: Float): Float {
+            val y = srgbOetf(x).coerceIn(0.0f, 1.0f)
+            // Smoothstep is an S-curve mapping 0..1 -> 0..1 with toe/shoulder.
+            val s = y * y * (3.0f - 2.0f * y)
+            val a = amount.coerceIn(0.0f, 1.0f)
+            return (y * (1.0f - a) + s * a).coerceIn(0.0f, 1.0f)
+        }
+
+        private fun makeTonemapCurveSrgb(samples: Int): TonemapCurve {
+            return buildTonemapCurve(samples, ::srgbOetf)
+        }
+
+        private fun makeTonemapCurveSCurve(samples: Int, amount: Float): TonemapCurve {
+            return buildTonemapCurve(samples) { x -> sCurveDisplay(x, amount) }
+        }
 
     }
 
@@ -225,6 +321,15 @@ class StereoCameraController(
     private var photoDistortionCorrectionMode: Int =
         CaptureRequest.DISTORTION_CORRECTION_MODE_HIGH_QUALITY
     private var photoEdgeMode: Int = CaptureRequest.EDGE_MODE_OFF
+    private var photoToneMapping: ToneMapping = ToneMapping.AUTO
+    private var photoTonemapAeCompensationSteps: Int = 0
+
+    // Tone Mapping debug (best-effort): request/response summaries for Logcat + optional toasts.
+    private var lastPreviewTonemapRequestSummary: String? = null
+    private var lastStillTonemapRequestSummary: String? = null
+    private var previewTonemapResultReported: Boolean = false
+    private var lastStillTonemapToastRealtimeMs: Long = 0L
+
     private var photoStillResolutionMode: StillResolutionMode = StillResolutionMode.LARGEST_COMMON
 
     // video processing (settings) -- applied to RECORDING only; preview is forced OFF.
@@ -314,6 +419,8 @@ class StereoCameraController(
         this.photoNoiseReductionMode = params.photo.noiseReductionMode
         this.photoDistortionCorrectionMode = params.photo.distortionCorrectionMode
         this.photoEdgeMode = params.photo.edgeMode
+        this.photoToneMapping = params.photo.toneMapping
+        this.photoTonemapAeCompensationSteps = params.photo.toneMapAeCompensationSteps
         this.photoStillResolutionMode = params.photo.stillResolutionMode
 
         this.zoom2xEnabled = params.zoom2xEnabled
@@ -1115,6 +1222,10 @@ class StereoCameraController(
         repeatingBuilder = null
         recordCaptureCallback = null
 
+        // Reset Tone Mapping debug state for this session.
+        lastPreviewTonemapRequestSummary = null
+        previewTonemapResultReported = false
+
         cancelPrimeUwLocked()
 
         closeReaders()
@@ -1179,10 +1290,41 @@ class StereoCameraController(
                             setPhysical(this, widePhysicalId, CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_OFF)
                             setPhysical(this, widePhysicalId, CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
 
+                            // AE exposure bias (best-effort; does not disable 3A)
+                            applyPhotoTonemapAeCompensation(this, applyWide = true, applyUltra = false)
+
+                            // Tone mapping (best-effort; devices may ignore)
+                            applyPhotoToneMapping(this, applyWide = true, applyUltra = false)
+
                             applyTorch(this)
                         }
                         repeatingBuilder = builder
-                        sess.setRepeatingRequest(builder.build(), null, handler)
+
+                        // If Tone Mapping is enabled, attach a tiny one-shot callback so we can log/verify
+                        // what the device actually applied (some vendors may ignore requests).
+                        val toneMapCb: CameraCaptureSession.CaptureCallback? =
+                            if (photoToneMapping != ToneMapping.AUTO) {
+                                object : CameraCaptureSession.CaptureCallback() {
+                                    override fun onCaptureCompleted(
+                                        session: CameraCaptureSession,
+                                        request: CaptureRequest,
+                                        result: TotalCaptureResult
+                                    ) {
+                                        if (previewTonemapResultReported) return
+                                        previewTonemapResultReported = true
+                                        logAndMaybeToastTonemapResult(
+                                            stage = "preview",
+                                            requestSummary = lastPreviewTonemapRequestSummary,
+                                            result = result,
+                                            toast = true
+                                        )
+                                    }
+                                }
+                            } else {
+                                null
+                            }
+
+                        sess.setRepeatingRequest(builder.build(), toneMapCb, handler)
                         // One-time ultrawide priming (optional)
                         if (primeUwOnActiveEnabled) {
                             primeUwPending = true
@@ -1541,6 +1683,14 @@ class StereoCameraController(
                 // set 3A to be controlled automatically
                 set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
 
+                // AE exposure bias (best-effort; does not disable 3A)
+                applyPhotoTonemapAeCompensation(this, applyWide = true, applyUltra = true)
+
+                // Tone mapping (processed outputs only). Does not touch 3A.
+                if (!raw) {
+                    applyPhotoToneMapping(this, applyWide = true, applyUltra = true)
+                }
+
                 applyCommonNoCropNoStab(this, isVideo = false, targetFps = previewTargetFps, applyFpsRange = false)
                 applyTorch(this)
 
@@ -1557,6 +1707,16 @@ class StereoCameraController(
                         val cap = currentPhoto
                         if (cap != null) {
                             cap.totalResult = result
+
+                            if (!raw && photoToneMapping != ToneMapping.AUTO) {
+                                logAndMaybeToastTonemapResult(
+                                    stage = "still",
+                                    requestSummary = lastStillTonemapRequestSummary,
+                                    result = result,
+                                    toast = enablePhotoSyncToast
+                                )
+                            }
+
                             tryFinalizePhotoIfReady()
                         }
                     }
@@ -2203,6 +2363,322 @@ class StereoCameraController(
 
         // constrain ultrawide 3A to overlap-ish center region
         applyUltrawide3ARegions(builder)
+    }
+
+
+    // -----------------------------------------------------------------------------------------
+    // Photo tone mapping (best-effort)
+    // -----------------------------------------------------------------------------------------
+
+    private fun supportsTonemapMode(chars: CameraCharacteristics?, mode: Int): Boolean {
+        val available = chars?.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES)
+        return available?.contains(mode) ?: true
+    }
+
+    private fun tonemapModeToString(mode: Int?): String {
+        return when (mode) {
+            null -> "null"
+            CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE -> "CONTRAST_CURVE"
+            CaptureRequest.TONEMAP_MODE_FAST -> "FAST"
+            CaptureRequest.TONEMAP_MODE_HIGH_QUALITY -> "HIGH_QUALITY"
+            CaptureRequest.TONEMAP_MODE_GAMMA_VALUE -> "GAMMA_VALUE"
+            CaptureRequest.TONEMAP_MODE_PRESET_CURVE -> "PRESET_CURVE"
+            else -> mode.toString()
+        }
+    }
+
+    private fun tonemapPresetToString(preset: Int?): String {
+        return when (preset) {
+            null -> "null"
+            CaptureRequest.TONEMAP_PRESET_CURVE_SRGB -> "SRGB"
+            CaptureRequest.TONEMAP_PRESET_CURVE_REC709 -> "REC709"
+            else -> preset.toString()
+        }
+    }
+
+    private fun tonemapAvailableModesToString(chars: CameraCharacteristics?): String {
+        val modes = chars?.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES)
+        return if (modes == null) {
+            "unknown"
+        } else {
+            modes.joinToString(prefix = "[", postfix = "]") { tonemapModeToString(it) }
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Photo exposure bias (AE compensation) for tonemap modes
+    // -----------------------------------------------------------------------------------------
+
+    private fun clampAeCompensation(chars: CameraCharacteristics?, steps: Int): Int {
+        val range = chars?.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        return if (range != null) {
+            steps.coerceIn(range.lower, range.upper)
+        } else {
+            steps
+        }
+    }
+
+    /**
+     * Apply an AE exposure compensation bias (CONTROL_AE_EXPOSURE_COMPENSATION) as a *proper*
+     * brightness control, without disabling 3A.
+     *
+     * IMPORTANT: We only apply this when Tone Mapping != AUTO, so the default "Auto" mode
+     * preserves the previous behavior 100%.
+     */
+    private fun applyPhotoTonemapAeCompensation(
+        builder: CaptureRequest.Builder,
+        applyWide: Boolean,
+        applyUltra: Boolean
+    ) {
+        if (photoToneMapping == ToneMapping.AUTO) return
+
+        val requested = photoTonemapAeCompensationSteps
+        if (requested == 0) return
+
+        // Logical key (best-effort)
+        try {
+            builder.set(
+                CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
+                clampAeCompensation(logicalChars, requested)
+            )
+        } catch (_: Exception) {
+        }
+
+        // Physical keys (best-effort)
+        if (applyWide) {
+            setPhysical(
+                builder,
+                widePhysicalId,
+                CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
+                clampAeCompensation(wideChars, requested)
+            )
+        }
+        if (applyUltra) {
+            setPhysical(
+                builder,
+                ultraPhysicalId,
+                CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
+                clampAeCompensation(ultraChars, requested)
+            )
+        }
+    }
+
+    /**
+     * Apply a global tonemap request for *processed* outputs (YUV/JPEG), attempting to discourage
+     * vendor local tone mapping. Does not touch 3A.
+     *
+     * AUTO -> no-op (preserves current behavior 100%).
+     */
+    private fun applyPhotoToneMapping(
+        builder: CaptureRequest.Builder,
+        applyWide: Boolean,
+        applyUltra: Boolean
+    ) {
+        val strategy = photoToneMapping
+        if (strategy == ToneMapping.AUTO) {
+            if (!applyUltra) lastPreviewTonemapRequestSummary = "AUTO (no-op)"
+            else lastStillTonemapRequestSummary = "AUTO (no-op)"
+            return
+        }
+
+        val wantContrastMode = CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE
+        val wantPresetMode = CaptureRequest.TONEMAP_MODE_PRESET_CURVE
+
+        fun supportsForAll(mode: Int): Boolean {
+            val wideOk = !applyWide ||
+                supportsTonemapMode(wideChars, mode) ||
+                supportsTonemapMode(logicalChars, mode)
+
+            val ultraOk = !applyUltra ||
+                supportsTonemapMode(ultraChars, mode) ||
+                supportsTonemapMode(logicalChars, mode)
+
+            return wideOk && ultraOk
+        }
+
+        val canContrast = supportsForAll(wantContrastMode)
+        val canPreset = supportsForAll(wantPresetMode)
+
+        fun setRequestSummary(summary: String) {
+            if (!applyUltra) lastPreviewTonemapRequestSummary = summary
+            else lastStillTonemapRequestSummary = summary
+        }
+
+        fun trySetContrast(curve: TonemapCurve, curveName: String, logFailure: Boolean = true): Boolean {
+            try {
+                builder.set(CaptureRequest.TONEMAP_MODE, wantContrastMode)
+                builder.set(CaptureRequest.TONEMAP_CURVE, curve)
+            } catch (e: Exception) {
+                if (logFailure) {
+                    Log.w(TAG, "Tonemap $strategy: failed to set CONTRAST_CURVE($curveName): ${e.message}")
+                }
+                return false
+            }
+
+            if (applyWide) {
+                setPhysical(builder, widePhysicalId, CaptureRequest.TONEMAP_MODE, wantContrastMode)
+                setPhysical(builder, widePhysicalId, CaptureRequest.TONEMAP_CURVE, curve)
+            }
+            if (applyUltra) {
+                setPhysical(builder, ultraPhysicalId, CaptureRequest.TONEMAP_MODE, wantContrastMode)
+                setPhysical(builder, ultraPhysicalId, CaptureRequest.TONEMAP_CURVE, curve)
+            }
+            setRequestSummary("${strategy.name}: CONTRAST_CURVE($curveName)")
+            return true
+        }
+
+        fun trySetContrastWithSampleFallback(make: (Int) -> TonemapCurve, nameBase: String): Boolean {
+            // Some devices are picky about the number of curve points. Try a finer curve first,
+            // but avoid noisy logs on the first attempt.
+            if (
+                trySetContrast(
+                    make(TONEMAP_CURVE_SAMPLES_FINE),
+                    "$nameBase n=$TONEMAP_CURVE_SAMPLES_FINE",
+                    logFailure = false
+                )
+            ) {
+                return true
+            }
+
+            return trySetContrast(
+                make(TONEMAP_CURVE_SAMPLES_COARSE),
+                "$nameBase n=$TONEMAP_CURVE_SAMPLES_COARSE",
+                logFailure = true
+            )
+        }
+
+        fun trySetPreset(preset: Int, presetName: String): Boolean {
+            try {
+                builder.set(CaptureRequest.TONEMAP_MODE, wantPresetMode)
+                builder.set(CaptureRequest.TONEMAP_PRESET_CURVE, preset)
+            } catch (e: Exception) {
+                Log.w(TAG, "Tonemap $strategy: failed to set PRESET_CURVE($presetName): ${e.message}")
+                return false
+            }
+
+            if (applyWide) {
+                setPhysical(builder, widePhysicalId, CaptureRequest.TONEMAP_MODE, wantPresetMode)
+                setPhysical(builder, widePhysicalId, CaptureRequest.TONEMAP_PRESET_CURVE, preset)
+            }
+            if (applyUltra) {
+                setPhysical(builder, ultraPhysicalId, CaptureRequest.TONEMAP_MODE, wantPresetMode)
+                setPhysical(builder, ultraPhysicalId, CaptureRequest.TONEMAP_PRESET_CURVE, preset)
+            }
+            setRequestSummary("${strategy.name}: PRESET_CURVE($presetName)")
+            return true
+        }
+
+        val applied: Boolean = when (strategy) {
+            ToneMapping.LINEAR -> {
+                // "Linear" here means: global, non-local tonemap, but still with normal display gamma.
+                when {
+                    canPreset && trySetPreset(CaptureRequest.TONEMAP_PRESET_CURVE_SRGB, "SRGB") -> true
+                    canContrast &&
+                        trySetContrastWithSampleFallback(
+                            make = { n -> makeTonemapCurveSrgb(n) },
+                            nameBase = "SRGB"
+                        ) -> true
+                    else -> false
+                }
+            }
+
+            ToneMapping.S_CURVE_WEAK,
+            ToneMapping.S_CURVE,
+            ToneMapping.S_CURVE_STRONG -> {
+                val (amt, label) = when (strategy) {
+                    ToneMapping.S_CURVE_WEAK -> S_CURVE_AMOUNT_WEAK to "S_WEAK"
+                    ToneMapping.S_CURVE_STRONG -> S_CURVE_AMOUNT_STRONG to "S_STRONG"
+                    else -> S_CURVE_AMOUNT_MILD to "S_MILD"
+                }
+
+                when {
+                    canContrast &&
+                        trySetContrastWithSampleFallback(
+                            make = { n -> makeTonemapCurveSCurve(n, amt) },
+                            nameBase = label
+                        ) -> true
+                    canPreset && trySetPreset(CaptureRequest.TONEMAP_PRESET_CURVE_REC709, "REC709") -> true
+                    else -> false
+                }
+            }
+
+            else -> false
+        }
+
+        val stage = if (applyUltra) "still" else "preview"
+        if (!applied) {
+            setRequestSummary("${strategy.name}: UNSUPPORTED (no tonemap keys set)")
+        }
+
+        // Log what we requested and what the device *claims* to support.
+        val aeCompSteps = photoTonemapAeCompensationSteps
+        Log.i(
+            TAG,
+            "Tonemap $stage request=${if (!applyUltra) lastPreviewTonemapRequestSummary else lastStillTonemapRequestSummary} " +
+                "| available logical=${tonemapAvailableModesToString(logicalChars)} " +
+                "wide=${tonemapAvailableModesToString(wideChars)} ultra=${tonemapAvailableModesToString(ultraChars)} " +
+                "| aeCompSteps=$aeCompSteps"
+        )
+    }
+
+    private fun captureResultTonemapSummary(result: CaptureResult): String {
+        val mode = result.get(CaptureResult.TONEMAP_MODE)
+        val modeName = tonemapModeToString(mode)
+
+        return when (mode) {
+            CaptureRequest.TONEMAP_MODE_GAMMA_VALUE -> {
+                val gamma = result.get(CaptureResult.TONEMAP_GAMMA)
+                val gammaStr = if (gamma != null) String.format(Locale.US, "%.2f", gamma) else "null"
+                "mode=$modeName gamma=$gammaStr"
+            }
+
+            CaptureRequest.TONEMAP_MODE_PRESET_CURVE -> {
+                val preset = result.get(CaptureResult.TONEMAP_PRESET_CURVE)
+                "mode=$modeName preset=${tonemapPresetToString(preset)}"
+            }
+
+            CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE -> "mode=$modeName"
+            else -> "mode=$modeName"
+        }
+    }
+
+    private fun totalCaptureResultTonemapSummary(result: TotalCaptureResult): String {
+        val parts = ArrayList<String>(3)
+        parts.add("logical{${captureResultTonemapSummary(result)}}")
+
+        val phys = result.physicalCameraResults
+        if (phys.isNotEmpty()) {
+            phys[widePhysicalId]?.let { parts.add("wide{${captureResultTonemapSummary(it)}}") }
+            phys[ultraPhysicalId]?.let { parts.add("ultra{${captureResultTonemapSummary(it)}}") }
+        }
+
+        return parts.joinToString(" ")
+    }
+
+    private fun logAndMaybeToastTonemapResult(
+        stage: String,
+        requestSummary: String?,
+        result: TotalCaptureResult,
+        toast: Boolean
+    ) {
+        val resSummary = totalCaptureResultTonemapSummary(result)
+        val req = requestSummary ?: "(no request)"
+        val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
+        val aeComp = result.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION)
+        val expNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+        val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)
+
+        Log.i(TAG, "Tonemap $stage result: req=$req res=$resSummary AE{state=$aeState comp=$aeComp expNs=$expNs iso=$iso}")
+
+        if (!toast) return
+
+        if (stage == "still") {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastStillTonemapToastRealtimeMs < 1500L) return
+            lastStillTonemapToastRealtimeMs = now
+        }
+
+        callback.onStatus("Tonemap $stage: $req -> $resSummary")
     }
 
     private fun <T> setPhysical(builder: CaptureRequest.Builder, physicalId: String, key: CaptureRequest.Key<T>, value: T) {

@@ -42,6 +42,11 @@ object AppSettings {
     const val KEY_PHOTO_NOISE_REDUCTION = "photo_noise_reduction"
     const val KEY_PHOTO_DISTORTION_CORRECTION = "photo_distortion_correction"
     const val KEY_PHOTO_EDGE_MODE = "photo_edge_mode"
+    // Tone mapping strategy for still capture (best-effort; devices may ignore)
+    const val KEY_PHOTO_TONE_MAPPING = "photo_tone_mapping"
+    // Exposure compensation (AE bias) applied ONLY when Tone Mapping is not Auto.
+    // Stored as an integer in the camera's AE compensation "steps".
+    const val KEY_PHOTO_TONEMAP_AE_COMP = "photo_tonemap_ae_comp"
     // Still capture resolution behavior (affects wide/ultrawide still ImageReader sizes)
     // "common" (default) -> use the largest resolution supported by both lenses
     // "per_lens" -> use the largest resolution for each lens independently
@@ -160,6 +165,30 @@ object AppSettings {
             "hq" -> CaptureRequest.EDGE_MODE_HIGH_QUALITY
             else -> CaptureRequest.EDGE_MODE_OFF
         }
+    }
+
+
+
+    /**
+     * Tone mapping strategy for processed (YUV/JPEG) still capture.
+     *
+     * "auto" -> do not set any Camera2 tonemap keys (preserve current behavior).
+     * Other values attempt to request a global curve to discourage local tonemapping.
+     */
+    fun getPhotoToneMapping(context: Context): String {
+        return prefs(context).getString(KEY_PHOTO_TONE_MAPPING, "auto") ?: "auto"
+    }
+
+    /**
+     * AE exposure compensation in the camera's native "steps".
+     *
+     * This biases auto-exposure (AE) but does NOT disable any 3A behavior.
+     *
+     * IMPORTANT: The app only applies this value when Tone Mapping != Auto, so the default
+     * "Auto" tone mapping mode preserves previous behavior 100%.
+     */
+    fun getPhotoTonemapAeCompSteps(context: Context): Int {
+        return prefs(context).getInt(KEY_PHOTO_TONEMAP_AE_COMP, 0)
     }
 
     fun getPhotoStillResolutionMode(context: Context): String {
@@ -420,6 +449,15 @@ object AppSettings {
         }
         if (!sp.contains(KEY_PHOTO_EDGE_MODE)) {
             editor.putString(KEY_PHOTO_EDGE_MODE, "off"); changed = true
+        }
+
+        if (!sp.contains(KEY_PHOTO_TONE_MAPPING)) {
+            editor.putString(KEY_PHOTO_TONE_MAPPING, "auto"); changed = true
+        }
+
+        // default: no AE bias
+        if (!sp.contains(KEY_PHOTO_TONEMAP_AE_COMP)) {
+            editor.putInt(KEY_PHOTO_TONEMAP_AE_COMP, 0); changed = true
         }
 
         // default: match wide+ultrawide still sizes to the largest common resolution (best sync)

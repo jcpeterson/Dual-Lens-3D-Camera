@@ -3,12 +3,16 @@ package com.example.duallens3dcamera.settings
 import android.content.SharedPreferences
 import android.os.Bundle
 import android.util.Size
+import android.hardware.camera2.CameraCharacteristics
+import android.util.Rational
 import android.widget.Toast
+import androidx.preference.SeekBarPreference
 import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.SwitchPreferenceCompat
 import com.example.duallens3dcamera.R
+import java.util.Locale
 
 class SettingsFragment : PreferenceFragmentCompat() {
 
@@ -43,6 +47,8 @@ class SettingsFragment : PreferenceFragmentCompat() {
         val noise = findPreference<ListPreference>(AppSettings.KEY_PHOTO_NOISE_REDUCTION) ?: return
         val dist = findPreference<ListPreference>(AppSettings.KEY_PHOTO_DISTORTION_CORRECTION) ?: return
         val edge = findPreference<ListPreference>(AppSettings.KEY_PHOTO_EDGE_MODE) ?: return
+        val tone = findPreference<ListPreference>(AppSettings.KEY_PHOTO_TONE_MAPPING)
+        val aeComp = findPreference<SeekBarPreference>(AppSettings.KEY_PHOTO_TONEMAP_AE_COMP)
 
         stillRes?.entries = arrayOf("Largest Per Lens", "Largest Common")
         stillRes?.entryValues = arrayOf("per_lens", "common")
@@ -59,6 +65,57 @@ class SettingsFragment : PreferenceFragmentCompat() {
         edge.entries = arrayOf("Off", "Fast", "High quality")
         edge.entryValues = arrayOf("off", "fast", "hq")
         edge.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+
+        tone?.entries = arrayOf(
+            "Auto",
+            "Linear",
+            "Weak S-curve",
+            "Mild S-curve",
+            "Strong S-curve"
+        )
+        // Keep legacy value "s_curve" as the mild default for backward compatibility.
+        tone?.entryValues = arrayOf("auto", "linear", "s_curve_weak", "s_curve", "s_curve_strong")
+        tone?.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+
+        // Exposure compensation is a proper AE bias (does not disable AE/3A). We only apply it
+        // when Tone Mapping != Auto, so default behavior remains unchanged.
+        val stepEvWide: Float? = run {
+            val caps = AppSettings.loadStereoCaps(requireContext())
+            val step: Rational? = caps?.wide1xChars?.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
+            if (step == null || step.denominator == 0) null else step.numerator.toFloat() / step.denominator.toFloat()
+        }
+
+        fun formatAeCompSummary(steps: Int): String {
+            return if (stepEvWide != null) {
+                val ev = steps.toFloat() * stepEvWide
+                String.format(Locale.US, "%+.2f EV", ev)
+            } else {
+                String.format(Locale.US, "%+d", steps)
+            }
+        }
+
+        fun syncAeCompEnabledState(modeValue: String?) {
+            val mode = modeValue ?: tone?.value ?: "auto"
+            aeComp?.isEnabled = (mode != "auto")
+        }
+
+        // Initial enable state + summary.
+        syncAeCompEnabledState(tone?.value)
+        aeComp?.summary = formatAeCompSummary(aeComp?.value ?: 0)
+
+        // Keep AE comp enabled/disabled in sync with Tone Mapping.
+        tone?.onPreferenceChangeListener = Preference.OnPreferenceChangeListener { _, newValue ->
+            syncAeCompEnabledState(newValue as? String)
+            true
+        }
+
+        // Update summary immediately as the slider changes (summaryProvider alone does not
+        // refresh live while dragging).
+        aeComp?.onPreferenceChangeListener = Preference.OnPreferenceChangeListener { _, newValue ->
+            val v = (newValue as? Int) ?: 0
+            aeComp?.summary = formatAeCompSummary(v)
+            true
+        }
     }
 
     private fun setupBitratePref() {
