@@ -247,13 +247,30 @@ class StereoCameraController(
             }
         }
 
-        // Gentle S-curve in the *display* domain (after sRGB), to mimic a mild "camera JPEG" curve.
+//        // Gentle S-curve in the *display* domain (after sRGB), to mimic a mild "camera JPEG" curve.
+//        private fun sCurveDisplay(x: Float, amount: Float): Float {
+//            val y = srgbOetf(x).coerceIn(0.0f, 1.0f)
+//            // Smoothstep is an S-curve mapping 0..1 -> 0..1 with toe/shoulder.
+//            val s = y * y * (3.0f - 2.0f * y)
+//            val a = amount.coerceIn(0.0f, 1.0f)
+//            return (y * (1.0f - a) + s * a).coerceIn(0.0f, 1.0f)
+//        }
+
         private fun sCurveDisplay(x: Float, amount: Float): Float {
             val y = srgbOetf(x).coerceIn(0.0f, 1.0f)
-            // Smoothstep is an S-curve mapping 0..1 -> 0..1 with toe/shoulder.
+
+            // The contrasty S-curve
             val s = y * y * (3.0f - 2.0f * y)
-            val a = amount.coerceIn(0.0f, 1.0f)
-            return (y * (1.0f - a) + s * a).coerceIn(0.0f, 1.0f)
+
+            // FIX: Shadow Protection
+            // As y approaches 0, force 'effectiveAmount' to 0.
+            // This ensures that deep blacks use the pure sRGB Gamma (which has good slope)
+            // instead of the S-Curve (which has a flat, banding-prone slope).
+            // This "fades in" the contrast effect starting around 25% brightness.
+            val protection = (y * 4.0f).coerceIn(0.0f, 1.0f)
+            val effectiveAmount = amount * protection
+
+            return (y * (1.0f - effectiveAmount) + s * effectiveAmount).coerceIn(0.0f, 1.0f)
         }
 
         private fun makeTonemapCurveSrgb(samples: Int): TonemapCurve {
@@ -1325,7 +1342,8 @@ class StereoCameraController(
                             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
 
-                            applyCommonNoCropNoStab(this, isVideo = false, targetFps = previewTargetFps)
+                            // TODO: set applyFpsRange = false when tonemapping / exposure control is on
+                            applyCommonNoCropNoStab(this, isVideo = false, targetFps = previewTargetFps, applyFpsRange = false)
 
                             // Preview post-processing forced OFF (performance + reduce ISP variability).
                             try { set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF) } catch (_: Exception) {}
@@ -1522,9 +1540,8 @@ class StereoCameraController(
                             addTarget(wideEnc.inputSurface)
                             addTarget(ultraEnc.inputSurface)
 
-//                            applyCommonNoCropNoStab(this, isVideo = true)
                             applyCommonNoCropNoStab(this, isVideo = true, targetFps = requestedRecordFps)
-//                            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(TARGET_FPS, TARGET_FPS))
+
                             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
 
