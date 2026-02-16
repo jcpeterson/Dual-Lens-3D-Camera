@@ -205,7 +205,7 @@ object StereoSbs {
             CvSize(outW.toDouble(), outH.toDouble()),
             0.0,
             0.0,
-            Imgproc.INTER_LINEAR
+            Imgproc.INTER_CUBIC
         )
         cropped.release()
         return resized
@@ -413,12 +413,20 @@ object StereoSbs {
 
             // Warp ultrawide into wide geometry.
             ultraAligned = Mat()
+
+            // If the affine scale is >1 (and it usually is when matching UW → W FOV),
+            // use INTER_CUBIC to prevent softening fine detail / edges
+            val m = DoubleArray(6)
+            affineFull.get(0, 0, m)
+            val scale = kotlin.math.hypot(m[0], m[3]) // approx uniform scale
+            val interp = if (scale > 1.01) Imgproc.INTER_CUBIC else Imgproc.INTER_LINEAR
+
             Imgproc.warpAffine(
                 requireNotNull(ultraBgr),
                 ultraAligned,
                 requireNotNull(affineFull),
                 CvSize(wideW.toDouble(), wideH.toDouble()),
-                Imgproc.INTER_LINEAR,
+                interp,
                 Core.BORDER_CONSTANT,
                 Scalar(0.0, 0.0, 0.0)
             )

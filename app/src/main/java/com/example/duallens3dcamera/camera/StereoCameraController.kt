@@ -198,7 +198,7 @@ class StereoCameraController(
         // including the normal display gamma. An identity curve will therefore look very dark.
         // To keep "normal" brightness while still discouraging local/HDR tonemapping, we use an
         // sRGB-like global curve for LINEAR, and a very mild S-curve variant for S_CURVE.
-        private const val TONEMAP_CURVE_SAMPLES_FINE = 32
+        private const val TONEMAP_CURVE_SAMPLES_FINE = 64
         private const val TONEMAP_CURVE_SAMPLES_COARSE = 16
 
         // S-curve strength presets (amount of smoothstep mixed into the sRGB output curve).
@@ -206,12 +206,32 @@ class StereoCameraController(
         private const val S_CURVE_AMOUNT_MILD = 0.18f
         private const val S_CURVE_AMOUNT_STRONG = 0.30f
 
+//        private fun buildTonemapCurve(samples: Int, mapper: (Float) -> Float): TonemapCurve {
+//            val n = samples.coerceAtLeast(2)
+//            val pts = FloatArray(n * 2)
+//            for (i in 0 until n) {
+//                val x = i.toFloat() / (n - 1).toFloat()
+//                val y = mapper(x).coerceIn(0.0f, 1.0f)
+//                pts[i * 2] = x
+//                pts[i * 2 + 1] = y
+//            }
+//            return TonemapCurve(pts, pts, pts)
+//        }
         private fun buildTonemapCurve(samples: Int, mapper: (Float) -> Float): TonemapCurve {
-            val n = samples.coerceAtLeast(2)
+            val n = samples.coerceAtLeast(16)
             val pts = FloatArray(n * 2)
+
             for (i in 0 until n) {
-                val x = i.toFloat() / (n - 1).toFloat()
+                val t = i.toFloat() / (n - 1).toFloat()
+
+                // Apply a power curve to the input index.
+                // This clusters points in the shadows.
+                // When t=0.1 (10% through the array), x=0.01 (1% brightness).
+                // This gives us high resolution where the gamma curve is steepest.
+                val x = t * t
+
                 val y = mapper(x).coerceIn(0.0f, 1.0f)
+
                 pts[i * 2] = x
                 pts[i * 2 + 1] = y
             }
@@ -2507,6 +2527,15 @@ class StereoCameraController(
             return
         }
 
+        // Check hardware limit
+        val hardwareMax = logicalChars?.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 64
+
+        // Clip your ideal constant (64) against the real hardware limit
+        val safeSamples = TONEMAP_CURVE_SAMPLES_FINE.coerceAtMost(hardwareMax)
+
+        // Log it
+        Log.v(TAG, "Tonemap: Requested $TONEMAP_CURVE_SAMPLES_FINE curve points. Using $safeSamples (HW Max: $hardwareMax).")
+
         val wantContrastMode = CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE
         val wantPresetMode = CaptureRequest.TONEMAP_MODE_PRESET_CURVE
 
@@ -2704,7 +2733,7 @@ class StereoCameraController(
             lastStillTonemapToastRealtimeMs = now
         }
 
-        callback.onStatus("Tonemap $stage: $req -> $resSummary")
+//        callback.onStatus("Tonemap $stage: $req -> $resSummary")
     }
 
     private fun <T> setPhysical(builder: CaptureRequest.Builder, physicalId: String, key: CaptureRequest.Key<T>, value: T) {
