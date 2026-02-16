@@ -7,12 +7,16 @@ import android.content.pm.PackageManager
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
 import android.os.Bundle
 import android.os.Looper
+import android.util.Range
+import android.util.Rational
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
+import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -21,10 +25,12 @@ import com.example.duallens3dcamera.settings.AppSettings
 import com.example.duallens3dcamera.settings.SettingsActivity
 import com.example.duallens3dcamera.camera.StereoCameraController
 import com.example.duallens3dcamera.databinding.ActivityMainBinding
+import com.google.android.material.slider.Slider
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.max
+import kotlin.math.min
 
 class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
 
@@ -67,6 +73,11 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
 
     private var previewConfig: StereoCameraController.PreviewConfig? = null
 
+    // ---- Exposure compensation overlay (viewfinder) ----
+    private var aeCompRangeCommon: Range<Int>? = null
+    private var aeCompStepEv: Float? = null
+    private var aeCompUiInitialized: Boolean = false
+
     // for ensuring the preview always has the right aspect
     @Volatile private var reapplyTransformOnNextFrame = false
     private fun requestPreviewTransformReapply() {
@@ -99,6 +110,7 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         updateTopBarUi()
         updateZoomButton()
         updateTorchButton()
+        setupAeCompOverlayUi()
         updateUi()
 
 //        binding.btnVideoRes.setOnClickListener {
@@ -226,6 +238,8 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
         } else {
             AppSettings.ensureCameraBasedDefaults(this)
             loadPrefs()
+            refreshAeCompOverlayCaps()
+            syncAeCompOverlayFromState(applyToController = false)
             updateTopBarUi()
             updateZoomButton()
             updateTorchButton()
@@ -287,6 +301,9 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
                 )
             )
         )
+
+        // Now that a preview config exists, re-sync UI (enables the EV overlay if applicable).
+        updateUi()
 
         binding.textureView.post {
             configureTransform(binding.textureView.width, binding.textureView.height)
@@ -512,6 +529,192 @@ class MainActivity : AppCompatActivity(), StereoCameraController.Callback {
             binding.btnRecord.backgroundTintList = gray
             binding.btnRecord.setTextColor(ContextCompat.getColor(this, android.R.color.white))
         }
+
+        // Exposure compensation overlay (visible only when Tone Mapping != Auto)
+        syncAeCompOverlayFromState(applyToController = false)
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Exposure compensation overlay (viewfinder)
+    // -----------------------------------------------------------------------------------------
+
+    private fun setupAeCompOverlayUi() {
+        if (aeCompUiInitialized) return
+        aeCompUiInitialized = true
+
+        // Start hidden; we only show it when Tone Mapping != Auto.
+        binding.evPanel.visibility = View.GONE
+
+        // Keep the label in sync as the user drags.
+        binding.sliderEv.addOnChangeListener { _, value, _ ->
+            val steps = value.toInt()
+            updateAeCompLabel(steps)
+            updateAeCompPlusMinusEnabled(steps)
+        }
+
+        // Apply only when the user releases the slider (to avoid spamming repeating requests).
+        binding.sliderEv.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+            override fun onStartTrackingTouch(slider: Slider) = Unit
+            override fun onStopTrackingTouch(slider: Slider) {
+                applyAeCompStepsFromUi(slider.value.toInt())
+            }
+        })
+
+        binding.btnEvMinus.setOnClickListener { stepAeCompBy(-1) }
+        binding.btnEvPlus.setOnClickListener { stepAeCompBy(+1) }
+
+        // Initial label
+        updateAeCompLabel(photoTonemapAeCompSteps)
+        updateAeCompPlusMinusEnabled(photoTonemapAeCompSteps)
+    }
+
+    /**
+     * Refresh AE compensation range/step from camera characteristics (best-effort).
+     *
+     * We compute a conservative range by intersecting wide + ultrawide ranges so the same value
+     * can be applied to both lenses.
+     */
+    private fun refreshAeCompOverlayCaps() {
+        if (!aeCompUiInitialized) return
+
+        val caps = AppSettings.loadStereoCaps(this) ?: return
+
+        val wideRange = caps.wide1xChars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        val ultraRange = caps.ultraChars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        aeCompRangeCommon = intersectRanges(wideRange, ultraRange)
+
+        val step = caps.wide1xChars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
+        aeCompStepEv = if (step != null && step.denominator != 0) {
+            step.numerator.toFloat() / step.denominator.toFloat()
+        } else {
+            null
+        }
+
+        // Apply to the slider if we have a range.
+        aeCompRangeCommon?.let { r ->
+            binding.sliderEv.valueFrom = r.lower.toFloat()
+            binding.sliderEv.valueTo = r.upper.toFloat()
+            binding.sliderEv.stepSize = 1f
+
+            // Keep the current value valid for the new range.
+            val v = binding.sliderEv.value
+            binding.sliderEv.value = v.coerceIn(binding.sliderEv.valueFrom, binding.sliderEv.valueTo)
+        }
+    }
+
+    private fun intersectRanges(a: Range<Int>?, b: Range<Int>?): Range<Int>? {
+        return when {
+            a == null && b == null -> null
+            a == null -> b
+            b == null -> a
+            else -> {
+                val lo = max(a.lower, b.lower)
+                val hi = min(a.upper, b.upper)
+                if (lo <= hi) Range(lo, hi) else a
+            }
+        }
+    }
+
+    private fun shouldShowAeCompOverlay(): Boolean {
+        return photoToneMapping != StereoCameraController.ToneMapping.AUTO && !isRecording
+    }
+
+    /**
+     * Sync the viewfinder overlay (visibility, enabled state, label, and slider position)
+     * from the current activity state.
+     */
+    private fun syncAeCompOverlayFromState(applyToController: Boolean) {
+        if (!aeCompUiInitialized) return
+
+        val show = shouldShowAeCompOverlay()
+        binding.evPanel.visibility = if (show) View.VISIBLE else View.GONE
+        if (!show) return
+
+        val r = aeCompRangeCommon
+        val clampedSteps = if (r != null) {
+            photoTonemapAeCompSteps.coerceIn(r.lower, r.upper)
+        } else {
+            // Fall back to the slider's current bounds (prevents out-of-range crashes
+            // before we have camera characteristics).
+            val lo = binding.sliderEv.valueFrom.toInt()
+            val hi = binding.sliderEv.valueTo.toInt()
+            photoTonemapAeCompSteps.coerceIn(lo, hi)
+        }
+
+        if (clampedSteps != photoTonemapAeCompSteps) {
+            // Persist the clamped value so the UI never shows something that can't be applied.
+            photoTonemapAeCompSteps = clampedSteps
+            prefs.edit().putInt(AppSettings.KEY_PHOTO_TONEMAP_AE_COMP, clampedSteps).apply()
+            if (applyToController && previewConfig != null) {
+                controller.setPhotoTonemapAeCompensationSteps(clampedSteps)
+            }
+        }
+
+        // Keep slider + label aligned with current value.
+        if (binding.sliderEv.value.toInt() != clampedSteps) {
+            // Ensure slider stays within bounds even if caps weren't available at app launch.
+            binding.sliderEv.value = clampedSteps.toFloat()
+        }
+        updateAeCompLabel(clampedSteps)
+
+        val controlsEnabled = (!isBusy && !isRecording && previewConfig != null)
+        binding.sliderEv.isEnabled = controlsEnabled
+        binding.btnEvMinus.isEnabled = controlsEnabled
+        binding.btnEvPlus.isEnabled = controlsEnabled
+        binding.evPanel.alpha = if (controlsEnabled) 0.85f else 0.45f
+
+        updateAeCompPlusMinusEnabled(clampedSteps)
+    }
+
+    private fun updateAeCompLabel(steps: Int) {
+        val stepEv = aeCompStepEv
+        binding.tvEvLabel.text = if (stepEv != null) {
+            val ev = steps.toFloat() * stepEv
+            String.format(Locale.US, "Exposure: %+.2f EV", ev)
+        } else {
+            String.format(Locale.US, "Exposure: %+d", steps)
+        }
+    }
+
+    private fun updateAeCompPlusMinusEnabled(steps: Int) {
+        val r = aeCompRangeCommon
+        if (r != null) {
+            binding.btnEvMinus.isEnabled = binding.btnEvMinus.isEnabled && (steps > r.lower)
+            binding.btnEvPlus.isEnabled = binding.btnEvPlus.isEnabled && (steps < r.upper)
+        }
+    }
+
+    private fun stepAeCompBy(deltaSteps: Int) {
+        if (!shouldShowAeCompOverlay()) return
+        if (!binding.sliderEv.isEnabled) return
+
+        val r = aeCompRangeCommon
+        val current = binding.sliderEv.value.toInt()
+        val next = if (r != null) {
+            (current + deltaSteps).coerceIn(r.lower, r.upper)
+        } else {
+            current + deltaSteps
+        }
+        if (next == current) return
+        binding.sliderEv.value = next.toFloat()
+        applyAeCompStepsFromUi(next)
+    }
+
+    private fun applyAeCompStepsFromUi(steps: Int) {
+        if (!shouldShowAeCompOverlay()) return
+        if (!binding.sliderEv.isEnabled) return
+
+        val r = aeCompRangeCommon
+        val clamped = if (r != null) steps.coerceIn(r.lower, r.upper) else steps
+        if (clamped == photoTonemapAeCompSteps) return
+
+        photoTonemapAeCompSteps = clamped
+        prefs.edit().putInt(AppSettings.KEY_PHOTO_TONEMAP_AE_COMP, clamped).apply()
+        controller.setPhotoTonemapAeCompensationSteps(clamped)
+
+        // Update label/buttons immediately.
+        updateAeCompLabel(clamped)
+        updateAeCompPlusMinusEnabled(clamped)
     }
 
     private fun timestampForFilename(): String {

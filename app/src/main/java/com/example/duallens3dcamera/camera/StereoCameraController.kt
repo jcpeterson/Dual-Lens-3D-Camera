@@ -642,6 +642,33 @@ class StereoCameraController(
         handler.post { updateTorchOnRepeating() }
     }
 
+    /**
+     * Update the photo AE compensation bias used when Tone Mapping != [ToneMapping.AUTO].
+     *
+     * This does **not** disable 3A (AE/AF/AWB). It simply biases the target exposure that AE
+     * converges to (best-effort; some devices may clamp or ignore it).
+     *
+     * Note: We intentionally do **not** apply this while recording video.
+     */
+    fun setPhotoTonemapAeCompensationSteps(steps: Int) {
+        photoTonemapAeCompensationSteps = steps
+        val handler = cameraHandler ?: return
+        handler.post {
+            if (isRecording) return@post
+            val sess = session ?: return@post
+            val rb = repeatingBuilder ?: return@post
+
+            // Preview is driven by the wide physical camera. (Ultrawide is for still/video.)
+            applyPhotoTonemapAeCompensation(rb, applyWide = true, applyUltra = false)
+
+            try {
+                sess.setRepeatingRequest(rb.build(), null, handler)
+            } catch (e: Exception) {
+                Log.w(TAG, "setPhotoTonemapAeCompensationSteps: update repeating failed: ${e.message}")
+            }
+        }
+    }
+
     fun setPhotoOutputRaw(raw: Boolean) {
         val handler = cameraHandler ?: return
         handler.post {
@@ -2433,7 +2460,6 @@ class StereoCameraController(
         if (photoToneMapping == ToneMapping.AUTO) return
 
         val requested = photoTonemapAeCompensationSteps
-        if (requested == 0) return
 
         // Logical key (best-effort)
         try {

@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto">
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
 
     <PreferenceCategory
         android:key="photo_category"
@@ -30,16 +29,6 @@
             android:key="photo_tone_mapping"
             android:title="Tone Mapping"
             android:defaultValue="auto" />
-
-        <androidx.preference.SeekBarPreference
-            android:key="photo_tonemap_ae_comp"
-            android:title="Exposure compensation"
-            android:summary="Bias auto-exposure (AE) without disabling 3A. Only applies when Tone Mapping is not Auto."
-            android:defaultValue="0"
-            android:max="12"
-            app:min="-12"
-            app:showSeekBarValue="true"
-            app:updatesContinuously="true" />
 
         <androidx.preference.SwitchPreferenceCompat
             android:key="photo_prime_uw_on_active"

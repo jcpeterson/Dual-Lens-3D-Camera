@@ -81,6 +81,100 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"/>
 
+    <!-- Exposure compensation overlay (only shown when Tone Mapping != Auto) -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/evPanel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="12dp"
+        android:alpha="0.85"
+        android:visibility="gone"
+        app:cardBackgroundColor="@android:color/black"
+        app:cardCornerRadius="16dp"
+        app:strokeWidth="0dp"
+        app:layout_constraintBottom_toBottomOf="@id/textureView"
+        app:layout_constraintStart_toStartOf="@id/textureView"
+        app:layout_constraintEnd_toStartOf="@id/btnZoom">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
+
+            <TextView
+                android:id="@+id/tvEvLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="EV +0.0"
+                android:textColor="@android:color/white"
+                android:textSize="12sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnEvMinus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:insetLeft="0dp"
+                    android:insetRight="0dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:paddingStart="0dp"
+                    android:paddingEnd="0dp"
+                    android:text="−"
+                    android:textAllCaps="false"
+                    android:textColor="@android:color/white"
+                    app:backgroundTint="@android:color/transparent"
+                    app:cornerRadius="18dp"
+                    app:strokeColor="@android:color/white"
+                    app:strokeWidth="1dp" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/sliderEv"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:valueFrom="-12"
+                    android:valueTo="12"
+                    android:stepSize="1"
+                    app:labelBehavior="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnEvPlus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:insetLeft="0dp"
+                    android:insetRight="0dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    android:paddingStart="0dp"
+                    android:paddingEnd="0dp"
+                    android:text="+"
+                    android:textAllCaps="false"
+                    android:textColor="@android:color/white"
+                    app:backgroundTint="@android:color/transparent"
+                    app:cornerRadius="18dp"
+                    app:strokeColor="@android:color/white"
+                    app:strokeWidth="1dp" />
+            </LinearLayout>
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
     <!-- 1x/2x zoom toggle (overlayed on preview) -->
     <com.google.android.material.button.MaterialButton
         android:id="@+id/btnZoom"
