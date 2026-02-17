@@ -40,7 +40,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.TotalCaptureResult
-
+import kotlin.math.min
 
 
 class StereoCameraController(
@@ -218,7 +218,7 @@ class StereoCameraController(
 //            return TonemapCurve(pts, pts, pts)
 //        }
         private fun buildTonemapCurve(samples: Int, mapper: (Float) -> Float): TonemapCurve {
-            val n = samples.coerceAtLeast(16)
+            val n = samples.coerceAtLeast(2)
             val pts = FloatArray(n * 2)
 
             for (i in 0 until n) {
@@ -2544,14 +2544,14 @@ class StereoCameraController(
             return
         }
 
-        // Check hardware limit
-        val hardwareMax = logicalChars?.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 64
-
-        // Clip your ideal constant (64) against the real hardware limit
-        val safeSamples = TONEMAP_CURVE_SAMPLES_FINE.coerceAtMost(hardwareMax)
-
-        // Log it
-        Log.v(TAG, "Tonemap: Requested $TONEMAP_CURVE_SAMPLES_FINE curve points. Using $safeSamples (HW Max: $hardwareMax).")
+//        // Check hardware limit
+//        val hardwareMax = logicalChars?.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 64
+//
+//        // Clip your ideal constant (64) against the real hardware limit
+//        val safeSamples = TONEMAP_CURVE_SAMPLES_FINE.coerceAtMost(hardwareMax)
+//
+//        // Log it
+//        Log.v(TAG, "Tonemap: Requested $TONEMAP_CURVE_SAMPLES_FINE curve points. Using $safeSamples (HW Max: $hardwareMax).")
 
         val wantContrastMode = CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE
         val wantPresetMode = CaptureRequest.TONEMAP_MODE_PRESET_CURVE
@@ -2599,24 +2599,12 @@ class StereoCameraController(
             return true
         }
 
-        fun trySetContrastWithSampleFallback(make: (Int) -> TonemapCurve, nameBase: String): Boolean {
-            // Some devices are picky about the number of curve points. Try a finer curve first,
-            // but avoid noisy logs on the first attempt.
-            if (
-                trySetContrast(
-                    make(TONEMAP_CURVE_SAMPLES_FINE),
-                    "$nameBase n=$TONEMAP_CURVE_SAMPLES_FINE",
-                    logFailure = false
-                )
-            ) {
-                return true
-            }
+        val hardwareMax = logicalChars?.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 16
+        Log.v(TAG, "Tonemap: $hardwareMax curve points allowed by hardware at most.")
 
-            return trySetContrast(
-                make(TONEMAP_CURVE_SAMPLES_COARSE),
-                "$nameBase n=$TONEMAP_CURVE_SAMPLES_COARSE",
-                logFailure = true
-            )
+        fun trySetContrastWithSampleFallback(make: (Int) -> TonemapCurve, nameBase: String): Boolean {
+            if (trySetContrast(make(hardwareMax), "$nameBase n=$hardwareMax", logFailure = true)) return true
+            return false
         }
 
         fun trySetPreset(preset: Int, presetName: String): Boolean {
