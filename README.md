@@ -112,3 +112,8 @@ Optional per-recording JSON logging:
 Output files:
 - Photos/videos are saved to `Pictures/StereoCapture` with timestamped filenames:
   - `*_wide.*`, `*_ultrawide.*`, `*_sbs.jpg` (JPEG mode), and optional `*_stereo.json`.
+
+### Development log
+
+See [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) for chronological investigation notes, design
+decisions, failed approaches, validation results, and links back to relevant Git history.
