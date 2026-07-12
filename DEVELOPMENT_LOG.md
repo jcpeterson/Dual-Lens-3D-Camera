@@ -12,6 +12,67 @@ When adding an entry, capture enough context that a future maintainer or agent c
 - how the result was verified; and
 - which commits, branches, or tags make the work easy to revisit.
 
+## 2026-07-12 - Establish a reproducible agent-development baseline
+
+### Starting point
+
+The `0.75.1` cleanup had been committed and tagged locally, but `master`, `origin/master`, and the
+remote tag set still pointed to the old `0.75` state. The project built successfully, but continued
+agent work exposed several environment and safety problems:
+
+- Android Studio metadata remained visible as an untracked `.idea/` directory and included local
+  device-selection state.
+- The owner's everyday app was the normal debug APK, so running connected instrumentation against
+  `debug` could uninstall that package and erase its private settings.
+- The build actually used AGP 8.2.2 and Kotlin 1.9.22, while the wrapper requested Gradle 8.13 and
+  the partially used version catalog declared different plugin and dependency versions.
+- The wrapper properties requested Gradle 8.13, but the checked-in wrapper JAR came from Gradle
+  9.0/9.1.
+- Command-line shells found Java 8 unless `JAVA_HOME` was overridden manually.
+
+### Decisions and changes
+
+- Fast-forwarded `master` through the cleanup and documentation commits, then pushed `master`,
+  `experiment/tonemap-0.75`, and `v0.75.1` to `origin`.
+- Added a separate `agent` build type with application ID
+  `com.example.duallens3dcamera.agent` and an `-agent` version-name suffix. The normal `debug`
+  package remains the owner's personal app, and the agent launcher label is visibly distinct.
+- Configured instrumentation to target only `agent`; agent test/install cleanup can no longer
+  remove the personal debug package.
+- Made `gradle/libs.versions.toml` the single source for plugin and dependency versions while
+  preserving the app's existing runtime dependency versions.
+- Aligned on Gradle 8.13, AGP 8.13.2, and Kotlin 2.3.21. The app still targets Java 17 bytecode.
+- Regenerated all wrapper files from Gradle 8.13 and added the official binary-distribution SHA-256
+  checksum. The regenerated wrapper JAR matches Gradle's published 8.13 checksum.
+- Persisted the primary Windows user's `JAVA_HOME` to Android Studio's bundled JBR 21 without
+  changing `PATH` or committing a machine-specific JDK path.
+- Ignored `.idea/` and `.kotlin/`, added cross-platform line-ending rules, and added `AGENTS.md` with
+  build, device-safety, verification, and history guidance.
+
+The first wrapper-regeneration command completed Gradle's `wrapper` task successfully but returned
+a transient batch error because `gradlew.bat` replaced itself while the running batch process was
+returning. The generated files were intact; their hashes were verified before continuing.
+
+### Verification
+
+- `gradlew --version` reported Gradle 8.13 on JetBrains JBR 21.0.8.
+- Both `assembleDebug` and `assembleAgent` passed from a clean build.
+- Both `testDebugUnitTest` and `testAgentUnitTest` passed.
+- `lintAgent` passed with 0 errors and 64 warnings.
+- Running with `--warning-mode all` produced no previous AGP/Gradle-9 incompatibility warnings.
+- The personal APK remained `com.example.duallens3dcamera`, version `0.75.1`, code 8.
+- The agent APK reported `com.example.duallens3dcamera.agent`, version `0.75.1-agent`, code 8.
+- `connectedAgentAndroidTest` passed on the Pixel 7 Pro and left the personal debug package
+  installed and unchanged.
+- The agent APK installed alongside the personal app, cold-launched into `MainActivity`, and
+  produced no fatal startup exception in the checked process log.
+
+### Remaining work
+
+The project still has template-level automated tests and source/lint warnings worth addressing over
+time. Public-release preparation also still requires an intentional application ID, current target
+SDK, durable release signing, licensing, CI, and store/privacy assets.
+
 ## 2026-07-11 - Remove unsupported tonemap controls (`0.75.1`)
 
 ### Starting point
@@ -95,9 +156,9 @@ feature release would therefore be `0.76.0` with code 9.
   preview-FPS behavior remained different.
 
 The command-line build initially selected Java 8 and failed while configuring Android Gradle
-Plugin 8.2.2. Rerunning Gradle with Android Studio's bundled Java 17 runtime resolved that
-environment problem without changing project configuration. The build emitted only an SDK XML
-tooling-version warning.
+Plugin 8.2.2. Rerunning Gradle with Android Studio's bundled JBR 21 runtime (21.0.8 at the time)
+resolved that environment problem without changing the app's Java 17 bytecode target. The build
+emitted only an SDK XML tooling-version warning.
 
 ### Testing caveat
 
