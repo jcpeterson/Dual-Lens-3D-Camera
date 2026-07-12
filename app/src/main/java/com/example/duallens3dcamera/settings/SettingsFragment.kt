@@ -43,7 +43,6 @@ class SettingsFragment : PreferenceFragmentCompat() {
         val noise = findPreference<ListPreference>(AppSettings.KEY_PHOTO_NOISE_REDUCTION) ?: return
         val dist = findPreference<ListPreference>(AppSettings.KEY_PHOTO_DISTORTION_CORRECTION) ?: return
         val edge = findPreference<ListPreference>(AppSettings.KEY_PHOTO_EDGE_MODE) ?: return
-        val tone = findPreference<ListPreference>(AppSettings.KEY_PHOTO_TONE_MAPPING)
 
         stillRes?.entries = arrayOf("Largest Per Lens", "Largest Common")
         stillRes?.entryValues = arrayOf("per_lens", "common")
@@ -60,17 +59,6 @@ class SettingsFragment : PreferenceFragmentCompat() {
         edge.entries = arrayOf("Off", "Fast", "High quality")
         edge.entryValues = arrayOf("off", "fast", "hq")
         edge.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-
-        tone?.entries = arrayOf(
-            "Auto",
-            "Linear",
-            "Weak S-curve",
-            "Mild S-curve",
-            "Strong S-curve"
-        )
-        // Keep legacy value "s_curve" as the mild default for backward compatibility.
-        tone?.entryValues = arrayOf("auto", "linear", "s_curve_weak", "s_curve", "s_curve_strong")
-        tone?.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
     }
 
     private fun setupBitratePref() {
