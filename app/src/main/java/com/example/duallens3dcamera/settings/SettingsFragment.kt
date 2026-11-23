@@ -16,6 +16,12 @@ class SettingsFragment : PreferenceFragmentCompat() {
         preferenceManager.sharedPreferencesName = AppSettings.PREFS_NAME
         setPreferencesFromResource(R.xml.settings_preferences, rootKey)
 
+        findPreference<Preference>("open_compat_test")?.setOnPreferenceClickListener {
+            startActivity(android.content.Intent(requireContext(),
+                com.example.duallens3dcamera.compat.CompatibilityTestActivity::class.java))
+            true
+        }
+
         AppSettings.ensureCameraBasedDefaults(requireContext())
 
         val sp = preferenceManager.sharedPreferences ?: return

@@ -12,6 +12,20 @@ When adding an entry, capture enough context that a future maintainer or agent c
 - how the result was verified; and
 - which commits, branches, or tags make the work easy to revisit.
 
+## 2026-11-23 - Compatibility test
+
+Settings > Debugging > Compatibility test (`CompatibilityTester`) checks whether a phone supports
+stereo capture with this app: lists listed and hidden camera IDs, finds the rear pair with
+`LensDiscovery`, captures one simultaneous YUV still from both lenses (blank check by luma deviation,
+timestamp gap; warm-up frames are drained first), and records 1.5 s into two surface-input H.264
+encoders with the same layout as the recording session (preview + two encoders; blank-frame check by
+bytes per frame), retrying with the main lens on the logical stream. Reports YES / YES (with
+workaround) / NO for photos and video with a share button.
+
+On `ruby`: photos YES (0.00 ms between lenses), video YES with workaround (direct main-lens encoder
+~52 bytes/frame, logical stream ~35 kB/frame). Without the preview stream the direct path also
+passes, which is why the test mirrors the app's session.
+
 ## 2026-11-23 - Hidden logical rear camera on Redmi Note 12 Pro 5G
 
 ### Finding
@@ -56,22 +70,22 @@ searching for a rear logical multi-camera. Lookups of absent IDs throw and are s
 `:app:assembleAgent :app:testAgentUnitTest :app:lintAgent` pass; lint reports only the three
 pre-existing `StereoCameraController` warnings. Installed and exercised on `ruby` over ADB.
 
+### Narrowing the video cause
+
+A later two-encoder test (see the compatibility test entry) showed the main-lens encoder bound to
+physical `0` records real frames when it is the only stream on that lens, and blank frames
+(~52 bytes/frame) when a preview stream on physical `0` runs next to it, which is the app's
+recording layout. With the main-lens encoder on the logical stream it records ~35 kB/frame.
+
 ### Open items
 
 - Video runs at the 15 fps setting; higher rates through logical `4` untested.
-- Wide/ultrawide colour, exposure and depth-of-field differ noticeably; SBS alignment for the
-  logical wide stream (slightly different crop from physical `0`) not yet checked.
-- Agent automation note: a phone call arrived during UI automation and a swipe may have answered
-  it. Check `mCallState` and the foreground activity before every injected input.
-
-### Mirror-adapter fallback
-
-`hardware/mirror-adapter/` holds a parametric OpenSCAD holder for a four-mirror side-by-side
-splitter on camera `0` and `verify_profile.py`, which ray-traces the rendered cross-section. The
-solver initially ignored inner-mirror coverage, which overstated results for 20 mm inner mirrors;
-that check is now included. Verified: 55x66x3 outer + 20x20x3 inner at 55 mm baseline uses 84% of
-each half-field cleanly. The 50x50x6 + 25x25x3 set at 60 mm still has 2 of 738 rays clipping a
-printed edge.
+- Eye order: on `ruby` held in upright landscape the main lens is the left eye (measured from
+  parallax on objects at known depths), so the ultrawide-left SBS layout came out depth-reversed.
+  `alignAndCreateSbsJpegBytes(wideOnLeft = true)` is now used for hidden-logical devices only;
+  other phones keep ultrawide-left.
+- Automation note: check `mCallState`, the keyguard and the foreground activity before every
+  injected input; the test phone received calls and locked itself during UI automation.
 
 ## 2026-11-23 - Redmi Note 12 Pro 5G investigation and hidden camera ID probe
 
