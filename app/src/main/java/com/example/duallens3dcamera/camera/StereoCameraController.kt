@@ -181,6 +181,11 @@ class StereoCameraController(
     // Is the phone a Pixel or not (assumed Samsung if not, for now)
     private var phoneIsAPixel: Boolean = true
 
+    // Xiaomi HyperOS quirk: with a hidden logical camera, a video-encoder surface bound to the
+    // wide (master) physical camera receives no image data. Feed the wide encoder from the
+    // logical stream instead (which the HAL serves from the wide sensor at zoom 1x).
+    private var wideVideoViaLogicalStream: Boolean = false
+
     // Active wide physical ID for the current zoom mode.
     private var widePhysicalId: String = WIDE_1X_PHYSICAL_ID
 
@@ -993,6 +998,10 @@ class StereoCameraController(
             ultraPhysicalId = rig.ultraId
             wide2xPhysicalId = rig.wide2xId
             phoneIsAPixel = rig.phoneIsAPixel
+            wideVideoViaLogicalStream = rig.logicalIsHidden
+            if (wideVideoViaLogicalStream) {
+                Log.i(TAG, "Hidden logical camera $logicalRearId: wide video will use the logical stream")
+            }
 
             // Override rotation behavior using the simple heuristic:
             // Pixel => portrait (ROTATION_0), Samsung => landscape (ROTATION_90)
@@ -1004,6 +1013,7 @@ class StereoCameraController(
             ultraPhysicalId = ULTRA_PHYSICAL_ID
             wide2xPhysicalId = null
             phoneIsAPixel = true
+            wideVideoViaLogicalStream = false
             displayRotation = Surface.ROTATION_0
         }
 
@@ -1323,7 +1333,9 @@ class StereoCameraController(
 
         val outputs = ArrayList<OutputConfiguration>(3).apply {
             add(OutputConfiguration(preview).apply { setPhysicalCameraId(widePhysicalId) })
-            add(OutputConfiguration(wideEnc.inputSurface).apply { setPhysicalCameraId(widePhysicalId) })
+            add(OutputConfiguration(wideEnc.inputSurface).apply {
+                if (!wideVideoViaLogicalStream) setPhysicalCameraId(widePhysicalId)
+            })
             add(OutputConfiguration(ultraEnc.inputSurface).apply { setPhysicalCameraId(ultraPhysicalId) })
         }
 
@@ -1832,7 +1844,10 @@ class StereoCameraController(
                             wideRight = wideFrame,
                             ultraLeft = ultraFrame,
                             zoom2xEnabled = zoom2xForThisSbs,
-                            fallbackUltraOverlapFraction = ultra3aFraction
+                            fallbackUltraOverlapFraction = ultra3aFraction,
+                            // Hidden-logical phones (Redmi Note 12 Pro 5G) held in landscape have
+                            // the wide lens as the left eye; other phones keep ultrawide-left.
+                            wideOnLeft = wideVideoViaLogicalStream
                         )
 
                         if (sbsBytes == null) {

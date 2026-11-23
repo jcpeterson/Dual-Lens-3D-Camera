@@ -246,7 +246,9 @@ object StereoSbs {
         featureMaxDim: Int = 1600,
         orbMaxFeatures: Int = 2000,
         ransacReprojThreshold: Double = 3.0,
-        minInliers: Int = 35
+        minInliers: Int = 35,
+        /** Put the wide image on the LEFT (verified eye order on phones with a hidden logical camera). */
+        wideOnLeft: Boolean = false
     ): ByteArray? {
         if (!ensureOpenCv()) return null
 
@@ -431,10 +433,12 @@ object StereoSbs {
                 Scalar(0.0, 0.0, 0.0)
             )
 
-            // Assemble SBS: LEFT = aligned ultra, RIGHT = wide
+            // Assemble SBS: LEFT = aligned ultra, RIGHT = wide (or swapped when wideOnLeft)
             sbs = Mat(wideH, wideW * 2, CvType.CV_8UC3)
-            requireNotNull(ultraAligned).copyTo(requireNotNull(sbs).submat(0, wideH, 0, wideW))
-            requireNotNull(wideBgr).copyTo(requireNotNull(sbs).submat(0, wideH, wideW, wideW * 2))
+            val leftMat = if (wideOnLeft) requireNotNull(wideBgr) else requireNotNull(ultraAligned)
+            val rightMat = if (wideOnLeft) requireNotNull(ultraAligned) else requireNotNull(wideBgr)
+            leftMat.copyTo(requireNotNull(sbs).submat(0, wideH, 0, wideW))
+            rightMat.copyTo(requireNotNull(sbs).submat(0, wideH, wideW, wideW * 2))
 
             return encodeJpegBytes(requireNotNull(sbs), 100)
         } catch (e: Exception) {

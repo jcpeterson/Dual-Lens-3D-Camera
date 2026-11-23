@@ -122,6 +122,11 @@
             android:key="debug_dump_camera_info"
             android:title="Dump device/camera info (one-time)"
             android:summary="Write a JSON dump (streams, fps ranges, capabilities, etc.) to Documents" />
+
+        <Preference
+            android:key="open_compat_test"
+            android:title="Compatibility test"
+            android:summary="Check whether this phone supports stereo photos and stereo video (including hidden camera pairs), and share a report." />
     </PreferenceCategory>
 
 </PreferenceScreen>
