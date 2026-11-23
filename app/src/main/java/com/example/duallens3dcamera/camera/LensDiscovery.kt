@@ -32,7 +32,13 @@ object LensDiscovery {
         /** Pixel or (assumed) Samsung */
         val phoneIsAPixel: Boolean,
         /** Pixel => portrait. Samsung => landscape. */
-        val assumedDisplayRotation: Int
+        val assumedDisplayRotation: Int,
+        /**
+         * True when the logical camera was found only by probing IDs missing from
+         * getCameraIdList (seen on Xiaomi HyperOS). Such HALs may not feed a video-encoder
+         * surface bound to the master physical camera.
+         */
+        val logicalIsHidden: Boolean = false
     )
 
     fun isPixelDevice(): Boolean {
@@ -92,7 +98,8 @@ object LensDiscovery {
             ultraId = ultra.id,
             wide2xId = wide2x?.id,
             phoneIsAPixel = isPixel,
-            assumedDisplayRotation = if (isPixel) Surface.ROTATION_0 else Surface.ROTATION_90
+            assumedDisplayRotation = if (isPixel) Surface.ROTATION_0 else Surface.ROTATION_90,
+            logicalIsHidden = logicalRearId !in cameraManager.cameraIdList
         )
     }
 
@@ -108,8 +115,22 @@ object LensDiscovery {
         val areaMm2: Float = physicalSize.width * physicalSize.height
     }
 
+    /**
+     * Highest numeric camera ID probed beyond [CameraManager.getCameraIdList]. Some vendor builds
+     * (Xiaomi HyperOS on the Redmi Note 12 Pro 5G) hide the rear logical multi-camera from the
+     * list for third-party apps but still serve it when asked for by ID.
+     */
+    private const val HIDDEN_ID_PROBE_MAX = 15
+
+    /** Listed IDs first, then numeric IDs the list omits. Lookups of absent IDs throw and are skipped. */
+    private fun candidateCameraIds(cameraManager: CameraManager): List<String> {
+        val listed = cameraManager.cameraIdList.toList()
+        val hidden = (0..HIDDEN_ID_PROBE_MAX).map { it.toString() }.filterNot { it in listed }
+        return listed + hidden
+    }
+
     private fun findBestLogicalRearCameraId(cameraManager: CameraManager): String? {
-        val ids = cameraManager.cameraIdList
+        val ids = candidateCameraIds(cameraManager)
 
         var bestId: String? = null
         var bestPhysicalCount = -1

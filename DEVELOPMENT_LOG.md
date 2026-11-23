@@ -12,6 +12,100 @@ When adding an entry, capture enough context that a future maintainer or agent c
 - how the result was verified; and
 - which commits, branches, or tags make the work easy to revisit.
 
+## 2026-11-23 - Hidden logical rear camera on Redmi Note 12 Pro 5G
+
+### Finding
+
+The schema-2 dump from `ruby` (`OS2.0.15.0.UMOINXM`) shows `getCameraIdList()` = `0, 1`, but IDs
+`2`, `3` and `4` answer direct `getCameraCharacteristics` and open alone from a third-party app:
+
+- `2`: rear ultrawide, 1.66 mm, 3.65x2.74 mm sensor, 3264x2448.
+- `3`: rear macro, 1.98 mm, 1600x1200.
+- `4`: rear `LOGICAL_MULTI_CAMERA`, FULL level, sync type APPROXIMATE, physical IDs `0` (main)
+  and `2` (ultrawide).
+
+Opening `2`, `3` or `4` while `0` is open fails with `ERROR_MAX_CAMERAS_IN_USE`, which is expected
+for two independent devices and says nothing about physical streams under the logical camera.
+`concurrentCameraIds` is empty.
+
+### Change
+
+`LensDiscovery` now considers numeric IDs `0..15` that the list omits, after the listed IDs, when
+searching for a rear logical multi-camera. Lookups of absent IDs throw and are skipped.
+
+### On-device results (agent build, USB)
+
+- Discovery picks logical `4` (wide `0`, ultrawide `2`); 2x mode is unavailable because no
+  half-size wide physical camera exists. Stills capture both lenses simultaneously and SBS output
+  works.
+- Video initially produced a valid ultrawide file but a wide file of uniform green frames
+  (all-zero YUV) at every resolution. The HAL accepted both encoder streams
+  (`physicalCameraId:0` and `:2`, `HW_VIDEO_ENCODER`) but its feature policy planned no record
+  stream (`rec[0xffff...]`) for the master physical camera.
+- A repeated ISP log line, `TG size is smaller than pipeline min width size(1920/1632)`, also
+  appears in working sessions and at other video sizes; it is not the cause.
+- Fix: `StereoRig.logicalIsHidden` marks a logical camera found only by ID probing, and the
+  recording session then binds the wide encoder surface to the logical stream (no
+  `setPhysicalCameraId`), which the HAL serves from the wide sensor at 1x. Preview, ultrawide and
+  stills are unchanged; listed-logical devices (Pixel, Samsung) keep the old path.
+- Verified at 1440x1080 and 1920x1080: both MP4s carry real, simultaneous footage
+  (about 33 MB each for 5.5 s, 15 fps setting).
+
+### Verification
+
+`:app:assembleAgent :app:testAgentUnitTest :app:lintAgent` pass; lint reports only the three
+pre-existing `StereoCameraController` warnings. Installed and exercised on `ruby` over ADB.
+
+### Open items
+
+- Video runs at the 15 fps setting; higher rates through logical `4` untested.
+- Wide/ultrawide colour, exposure and depth-of-field differ noticeably; SBS alignment for the
+  logical wide stream (slightly different crop from physical `0`) not yet checked.
+- Agent automation note: a phone call arrived during UI automation and a swipe may have answered
+  it. Check `mCallState` and the foreground activity before every injected input.
+
+### Mirror-adapter fallback
+
+`hardware/mirror-adapter/` holds a parametric OpenSCAD holder for a four-mirror side-by-side
+splitter on camera `0` and `verify_profile.py`, which ray-traces the rendered cross-section. The
+solver initially ignored inner-mirror coverage, which overstated results for 20 mm inner mirrors;
+that check is now included. Verified: 55x66x3 outer + 20x20x3 inner at 55 mm baseline uses 84% of
+each half-field cleanly. The 50x50x6 + 25x25x3 set at 60 mm still has 2 of 738 rays clipping a
+printed edge.
+
+## 2026-11-23 - Redmi Note 12 Pro 5G investigation and hidden camera ID probe
+
+### Device finding
+
+A camera dump from a Redmi Note 12 Pro 5G (`22101316I`, codename `ruby`, MediaTek `mt6877`,
+HyperOS `OS2.0.15.0.UMOINXM`, Android 14) showed that `getCameraIdList()` returns only `0` (rear
+main, 5.59 mm, 8.19x6.14 mm sensor, LEVEL_3, no physical sub-cameras) and `1` (front). There is no
+rear `LOGICAL_MULTI_CAMERA` and the 8 MP ultrawide and 2 MP macro are not listed, so
+`LensDiscovery` finds no stereo rig and the app cannot run on this firmware as-is.
+
+### Change
+
+`DebugDump` (schema 2) now writes a `hiddenCameraProbe` section. For IDs `0..15` missing from the
+list it attempts `getCameraCharacteristics`, then (with CAMERA permission) opens the ID alone and
+again while the listed rear camera is open, recording status and `CameraDevice` error codes. It also
+records `concurrentCameraIds` on API 30+. Responsive hidden IDs get the full per-camera dump. Some
+Xiaomi builds filter auxiliary lenses from the list but still answer direct lookups; this checks
+whether `ruby` does.
+
+### Rejected or deferred
+
+- Root plus aux-camera property overrides: needs bootloader unlock (restricted on HyperOS) and the
+  common props target the Qualcomm camera HAL, not MediaTek.
+- If the probe finds nothing, the fallback directions are a guided two-shot (slide) stereo mode and a
+  side-by-side mirror adapter mode (for example a Kula Bebe-style four-mirror clip-on) on camera 0.
+
+### Verification
+
+`:app:assembleAgent :app:testAgentUnitTest :app:lintAgent` pass (JDK 23, SDK at a non-default
+path with `platforms;android-34` and `build-tools;35.0.0` added). The older `cmdline-tools`
+`sdkmanager` misparses JDK 23's version string and needs `SKIP_JDK_VERSION_CHECK=1`. On-device
+dump from `ruby` still pending.
+
 ## 2026-07-12 - Establish a reproducible agent-development baseline
 
 ### Starting point
