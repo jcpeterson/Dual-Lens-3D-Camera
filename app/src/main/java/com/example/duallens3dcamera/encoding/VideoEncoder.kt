@@ -29,6 +29,7 @@ class VideoEncoder(
 
     private var firstPtsUs: Long = -1L
     @Volatile private var stopRequested: Boolean = false
+    @Volatile private var abandon: Boolean = false
 
     private var _inputSurface: Surface? = null
     val inputSurface: Surface
@@ -76,6 +77,7 @@ class VideoEncoder(
         codec!!.start()
 
         stopRequested = false
+        abandon = false
         drainThread = Thread({ drainLoop() }, "$tag-Drain").also { it.start() }
 
         Log.i(tag, "VideoEncoder started ${width}x${height}@${fps} bitrate=$bitrateBps i=$iFrameIntervalSec")
@@ -93,19 +95,31 @@ class VideoEncoder(
         stopRequested = true
         signalEndOfInputStream()
 
-        try {
-            drainThread?.join(5_000)
-        } catch (_: Exception) {
+        // Wait for EOS. If the encoder is backed up, give up on the remaining frames: tell the
+        // drain loop to exit and wait for it, so the codec is never released under a thread that
+        // is still using it (that threw IllegalStateException, killed the app and left the MP4
+        // without its index).
+        val t = drainThread
+        try { t?.join(5_000) } catch (_: Exception) {}
+        if (t != null && t.isAlive) {
+            Log.w(tag, "EOS not reached in 5 s; abandoning remaining frames")
+            abandon = true
+            try { t.join(2_000) } catch (_: Exception) {}
         }
         drainThread = null
 
-        try {
-            codec?.stop()
-        } catch (_: Exception) {
-        }
-        try {
-            codec?.release()
-        } catch (_: Exception) {
+        if (t != null && t.isAlive) {
+            // Still stuck inside the codec: leave it rather than release it under the thread.
+            Log.e(tag, "Drain thread did not exit; not releasing codec")
+        } else {
+            try {
+                codec?.stop()
+            } catch (_: Exception) {
+            }
+            try {
+                codec?.release()
+            } catch (_: Exception) {
+            }
         }
         codec = null
 
@@ -119,9 +133,19 @@ class VideoEncoder(
     }
 
     private fun drainLoop() {
+        // Never let a codec error escape this thread: an uncaught exception here kills the whole
+        // app before the muxers are stopped.
+        try {
+            drainLoopInner()
+        } catch (t: Throwable) {
+            Log.e(tag, "Video drain stopped: ${t.message}", t)
+        }
+    }
+
+    private fun drainLoopInner() {
         val codecLocal = codec ?: return
 
-        while (true) {
+        while (!abandon) {
             val outIndex = codecLocal.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
             when {
                 outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {

@@ -24,6 +24,16 @@
         </activity>
 
         <activity
+            android:name=".compat.CompatibilityTestActivity"
+            android:exported="false"
+            android:theme="@style/Theme.DualLens3DCamera.Settings" />
+
+        <activity
+            android:name=".video.Make3dVideoActivity"
+            android:exported="false"
+            android:theme="@style/Theme.DualLens3DCamera.Settings" />
+
+        <activity
             android:name=".settings.SettingsActivity"
             android:exported="false"
             android:theme="@style/Theme.DualLens3DCamera.Settings" />

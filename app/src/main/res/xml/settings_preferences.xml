@@ -39,6 +39,51 @@
     </PreferenceCategory>
 
     <PreferenceCategory
+        android:key="stereo_category"
+        android:title="3D output">
+
+        <Preference
+            android:key="open_compat_test"
+            android:title="Compatibility test"
+            android:summary="Check whether this phone supports 3D photos, 3D video and live 3D preview, and share a report." />
+
+        <Preference
+            android:key="open_make_3d_video"
+            android:title="Make 3D video from a recording"
+            android:summary="Align, colour-match and combine a wide + ultrawide recording into one side-by-side 3D video." />
+
+        <ListPreference
+            android:key="main_focus_mode"
+            android:title="Main lens focus"
+            android:dialogTitle="Main lens focus (the ultrawide is always fixed-focus)"
+            android:defaultValue="auto" />
+
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="stereo_correction"
+            android:title="3D correction"
+            android:summary="Align size, rotation and height, fix ultrawide distortion, match colour and set the stereo window (like Stereo Photo Maker). Off = original simple alignment."
+            android:defaultValue="true" />
+
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="stereo_colour_average"
+            android:title="Average colour of both lenses"
+            android:summary="Both lenses meet at their average colour and brightness. Off = the ultrawide copies the main lens (usually brighter)."
+            android:defaultValue="true" />
+
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="stereo_cross_eyed"
+            android:title="Cross-eyed layout"
+            android:summary="Save the side-by-side image as right|left for cross-eyed viewing. Off = left|right (parallel / VR)."
+            android:defaultValue="false" />
+
+        <androidx.preference.SwitchPreferenceCompat
+            android:key="stereo_swap_eyes"
+            android:title="Swap left and right"
+            android:summary="Use if near objects look farther away than far ones."
+            android:defaultValue="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory
         android:key="video_category"
         android:title="Video settings">
 

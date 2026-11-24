@@ -16,6 +16,17 @@ class SettingsFragment : PreferenceFragmentCompat() {
         preferenceManager.sharedPreferencesName = AppSettings.PREFS_NAME
         setPreferencesFromResource(R.xml.settings_preferences, rootKey)
 
+        findPreference<Preference>("open_compat_test")?.setOnPreferenceClickListener {
+            startActivity(android.content.Intent(requireContext(),
+                com.example.duallens3dcamera.compat.CompatibilityTestActivity::class.java))
+            true
+        }
+        findPreference<Preference>("open_make_3d_video")?.setOnPreferenceClickListener {
+            startActivity(android.content.Intent(requireContext(),
+                com.example.duallens3dcamera.video.Make3dVideoActivity::class.java))
+            true
+        }
+
         AppSettings.ensureCameraBasedDefaults(requireContext())
 
         val sp = preferenceManager.sharedPreferences ?: return
@@ -59,6 +70,16 @@ class SettingsFragment : PreferenceFragmentCompat() {
         edge.entries = arrayOf("Off", "Fast", "High quality")
         edge.entryValues = arrayOf("off", "fast", "hq")
         edge.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+
+        findPreference<ListPreference>(AppSettings.KEY_MAIN_FOCUS_MODE)?.apply {
+            entries = arrayOf(
+                "Auto: keeps focusing on the subject",
+                "Match ultrawide: fixed far focus (landscapes, groups, 3D video)",
+                "Lock at start: focus once when recording or time-lapse starts"
+            )
+            entryValues = arrayOf("auto", "match_uw", "lock")
+            summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+        }
     }
 
     private fun setupBitratePref() {
@@ -151,7 +172,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         resPref.entryValues = sizes.map { AppSettings.sizeToString(it) }.toTypedArray()
         resPref.summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
 
-        val def = AppSettings.chooseDefaultVideoSize(sizes)
+        val def = AppSettings.chooseDefaultVideoSize(caps, sizes)
         val current = AppSettings.parseSize(sp.getString(AppSettings.KEY_VIDEO_RESOLUTION, null))
             ?.takeIf { s -> sizes.any { it.width == s.width && it.height == s.height } }
             ?: def

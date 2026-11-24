@@ -10,6 +10,9 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.StreamConfigurationMap
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
+import android.media.MediaFormat
 import android.util.Size
 //import android.view.SurfaceTexture
 import android.graphics.SurfaceTexture
@@ -52,6 +55,22 @@ object AppSettings {
     // Whether or not to save the two images separately on top of the sbs output
     // Note: Applies in JPG mode only (RAW mode always provides two dng files and not sbs)
     const val KEY_PHOTO_SAVE_INDIVIDUAL_IMAGES = "photo_save_individual_images"
+
+    // 3D output (photos)
+    const val KEY_STEREO_CORRECTION = "stereo_correction"     // align + colour match + window
+    const val KEY_STEREO_CROSS_EYED = "stereo_cross_eyed"     // SBS as R|L instead of L|R
+    const val KEY_STEREO_SWAP_EYES = "stereo_swap_eyes"       // flip the default eye assignment
+    const val KEY_PREVIEW_3D_MODE = "preview_3d_mode"         // StereoCameraController.Preview3dMode name
+    const val KEY_STEREO_COLOUR_AVERAGE = "stereo_colour_average" // true: both lenses meet at the average colour
+
+    // Main-screen tools
+    const val KEY_SELF_TIMER_SEC = "self_timer_sec"           // 0, 3, 5, 10
+    const val KEY_VIEWFINDER_GUIDE = "viewfinder_guide"       // OFF | GRID | GRID_LEVEL | LEVEL
+    const val KEY_LAPSE_INTERVAL_SEC = "lapse_interval_sec"
+    const val KEY_LAPSE_FRAMES = "lapse_frames"
+    const val KEY_MAIN_FOCUS_MODE = "main_focus_mode"         // auto | match_uw | lock
+    const val KEY_PRO_ISO = "pro_iso"                         // Int, 0 = auto
+    const val KEY_PRO_SHUTTER_NS = "pro_shutter_ns"           // Long, 0 = auto
 
     // Debugging (Advanced)
     const val KEY_DEBUG_VIDEO_LOG_ENABLED = "debug_video_log_enabled"
@@ -169,6 +188,18 @@ object AppSettings {
     fun getPhotoSaveIndividualImages(context: Context): Boolean =
         prefs(context).getBoolean(KEY_PHOTO_SAVE_INDIVIDUAL_IMAGES, false)
 
+    fun getStereoCorrectionEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_STEREO_CORRECTION, true)
+
+    fun getStereoCrossEyed(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_STEREO_CROSS_EYED, false)
+
+    fun getStereoSwapEyes(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_STEREO_SWAP_EYES, false)
+
+    fun getStereoColourAverage(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_STEREO_COLOUR_AVERAGE, true)
+
     fun getPhotoPrimeUwOnActiveEnabled(context: Context): Boolean =
         prefs(context).getBoolean(KEY_PHOTO_PRIME_UW_ON_ACTIVE, false)
 
@@ -252,8 +283,45 @@ object AppSettings {
         val ultraSet = ultraSizes.map { it.width to it.height }.toSet()
         val common = wideSizes.filter { ultraSet.contains(it.width to it.height) }
 
+        // Only offer sizes the H.264 encoder can record twice at once (wide + ultrawide) at some
+        // frame rate. Camera sizes can exceed the encoder's limits: on the Redmi Note 12 Pro the
+        // default 3264x2448 is taller than the encoder's 3840x2176 maximum, and recordings stalled
+        // and crashed on stop.
         return common.distinctBy { it.width to it.height }
+            .filter { s -> supportedVideoFpsForSize(caps, s).isNotEmpty() }
             .sortedByDescending { it.width.toLong() * it.height.toLong() }
+    }
+
+    private val encoderSupportCache = HashMap<Triple<Int, Int, Int>, Boolean>()
+
+    /**
+     * True when a hardware H.264 encoder accepts [size] and can run two such streams at [fps]
+     * (checked as one stream at twice the rate against the declared performance points).
+     */
+    fun encoderSupportsStereo(size: Size, fps: Int): Boolean = synchronized(encoderSupportCache) {
+        encoderSupportCache.getOrPut(Triple(size.width, size.height, fps)) {
+            try {
+                MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
+                    if (!info.isEncoder || !info.isHardwareAccelerated) return@any false
+                    if (info.supportedTypes.none { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) }) return@any false
+                    val vc = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities
+                        ?: return@any false
+                    // Encoders pad to their block alignment (1080 rows are coded as 1088), but the
+                    // capability check rejects unaligned sizes outright, so check the padded size.
+                    fun up(v: Int, a: Int) = if (a > 1) (v + a - 1) / a * a else v
+                    val w = up(size.width, vc.widthAlignment)
+                    val h = up(size.height, vc.heightAlignment)
+                    val sizeOk = vc.isSizeSupported(w, h)
+                    val points = vc.supportedPerformancePoints
+                    val need = MediaCodecInfo.VideoCapabilities.PerformancePoint(w, h, 2 * fps)
+                    val rateOk = if (!points.isNullOrEmpty()) points.any { it.covers(need) }
+                        else vc.areSizeAndRateSupported(w, h, 2.0 * fps)
+                    sizeOk && rateOk
+                }
+            } catch (_: Exception) {
+                true // don't hide everything if the codec list can't be read
+            }
+        }
     }
 
     /**
@@ -278,9 +346,12 @@ object AppSettings {
             .sortedByDescending { it.width.toLong() * it.height.toLong() }
     }
 
-    fun chooseDefaultVideoSize(commonVideoSizes: List<Size>): Size {
+    /** Largest 4:3 size that records at 30 fps; otherwise the largest size that records at all. */
+    fun chooseDefaultVideoSize(caps: StereoCaps, commonVideoSizes: List<Size>): Size {
         val fourByThree = commonVideoSizes.filter { SizeSelector.isFourByThree(it) }
-        return (fourByThree.ifEmpty { commonVideoSizes })
+        val pool = fourByThree.ifEmpty { commonVideoSizes }
+        val at30 = pool.filter { supportedVideoFpsForSize(caps, it).contains(30) }
+        return at30.ifEmpty { pool }
             .maxByOrNull { it.width.toLong() * it.height.toLong() }
             ?: FALLBACK_VIDEO_SIZE
     }
@@ -303,7 +374,8 @@ object AppSettings {
             caps.ultraChars to caps.ultraMap
         )
         return FPS_CANDIDATES.filter { fps ->
-            cams.all { (chars, map) -> supportsFps(chars, map, ImageFormat.PRIVATE, size, fps) }
+            cams.all { (chars, map) -> supportsFps(chars, map, ImageFormat.PRIVATE, size, fps) } &&
+                encoderSupportsStereo(size, fps)
         }
     }
 
@@ -377,15 +449,28 @@ object AppSettings {
         }
 
         val caps = loadStereoCaps(context)
-        if (!sp.contains(KEY_VIDEO_RESOLUTION)) {
-            val def = caps?.let { chooseDefaultVideoSize(commonVideoSizes(it)) } ?: FALLBACK_VIDEO_SIZE
-            editor.putString(KEY_VIDEO_RESOLUTION, sizeToString(def))
+        val videoSizes = caps?.let { commonVideoSizes(it) }
+        val savedSize = parseSize(sp.getString(KEY_VIDEO_RESOLUTION, null))
+        // Also replace a saved size the encoder can't record (older builds defaulted to one).
+        val savedUnsupported = savedSize != null && videoSizes != null && videoSizes.isNotEmpty() &&
+            videoSizes.none { it.width == savedSize.width && it.height == savedSize.height }
+        var videoSize = savedSize ?: FALLBACK_VIDEO_SIZE
+        if (!sp.contains(KEY_VIDEO_RESOLUTION) || savedUnsupported) {
+            videoSize = caps?.let { chooseDefaultVideoSize(it, videoSizes.orEmpty()) } ?: FALLBACK_VIDEO_SIZE
+            editor.putString(KEY_VIDEO_RESOLUTION, sizeToString(videoSize))
             changed = true
         }
+        val savedFps = sp.getString(KEY_VIDEO_FPS, null)?.toIntOrNull()
+        if (!savedUnsupported && savedFps != null && caps != null && savedSize != null) {
+            val allowed = supportedVideoFpsForSize(caps, savedSize)
+            if (allowed.isNotEmpty() && savedFps !in allowed) {
+                editor.putString(KEY_VIDEO_FPS, (if (30 in allowed) 30 else allowed.max()).toString())
+                changed = true
+            }
+        }
 
-        if (!sp.contains(KEY_VIDEO_FPS)) {
-            val chosenSize = parseSize(sp.getString(KEY_VIDEO_RESOLUTION, null)) ?: FALLBACK_VIDEO_SIZE
-            val fps = caps?.let { supportedVideoFpsForSize(it, chosenSize) }?.let {
+        if (!sp.contains(KEY_VIDEO_FPS) || savedUnsupported) {
+            val fps = caps?.let { supportedVideoFpsForSize(it, videoSize) }?.let {
                 when {
                     it.contains(30) -> 30
                     it.isNotEmpty() -> it.maxOrNull()
@@ -429,6 +514,15 @@ object AppSettings {
         // default: in JPG mode, output only SBS, no individual images
         if (!sp.contains(KEY_PHOTO_SAVE_INDIVIDUAL_IMAGES)) {
             editor.putBoolean(KEY_PHOTO_SAVE_INDIVIDUAL_IMAGES, false); changed = true
+        }
+        if (!sp.contains(KEY_STEREO_CORRECTION)) {
+            editor.putBoolean(KEY_STEREO_CORRECTION, true); changed = true
+        }
+        if (!sp.contains(KEY_STEREO_CROSS_EYED)) {
+            editor.putBoolean(KEY_STEREO_CROSS_EYED, false); changed = true
+        }
+        if (!sp.contains(KEY_STEREO_SWAP_EYES)) {
+            editor.putBoolean(KEY_STEREO_SWAP_EYES, false); changed = true
         }
 
         // default: ultrawide priming is OFF

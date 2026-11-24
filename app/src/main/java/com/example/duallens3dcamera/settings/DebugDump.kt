@@ -1,13 +1,18 @@
 package com.example.duallens3dcamera.settings
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.params.StreamConfigurationMap
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.JsonWriter
 import android.util.Range
 import android.util.Size
@@ -17,10 +22,15 @@ import java.io.OutputStreamWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 object DebugDump {
 
-    private const val SCHEMA_VERSION = 1
+    private const val SCHEMA_VERSION = 2
+    private const val HIDDEN_PROBE_MAX_ID = 15
+    private const val HIDDEN_PROBE_OPEN_TIMEOUT_MS = 3000L
 
     data class DumpResult(val uri: android.net.Uri, val displayName: String)
 
@@ -228,6 +238,10 @@ object DebugDump {
             } catch (_: Exception) {}
         }
 
+        // Hidden IDs that answer when asked directly (some vendors filter the list but not lookups).
+        val hiddenResponsiveIds = writeHiddenCameraProbe(context, cm, w, cameraIdList)
+        allIds.addAll(hiddenResponsiveIds)
+
         // Rig IDs (wide/ultra/tele) if discovered
         if (rig != null) {
             allIds.add(rig.logicalRearId)
@@ -328,6 +342,171 @@ object DebugDump {
             w.endObject()
         }
         w.endArray()
+    }
+
+    /**
+     * Probes camera IDs that CameraManager.getCameraIdList() does not report. Some vendor builds
+     * (notably Xiaomi) hide auxiliary lenses from the list for third-party apps but still answer
+     * direct characteristic lookups or open requests by ID.
+     *
+     * Writes a "hiddenCameraProbe" object and returns the IDs whose characteristics could be read.
+     * Must be called off the main thread: open attempts block on a latch.
+     */
+    private fun writeHiddenCameraProbe(
+        context: Context,
+        cm: CameraManager,
+        w: JsonWriter,
+        listedIds: List<String>
+    ): List<String> {
+        val responsive = mutableListOf<String>()
+        val hasCameraPermission =
+            context.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+        w.name("hiddenCameraProbe").beginObject()
+        w.name("probedIdRange").value("0..${HIDDEN_PROBE_MAX_ID}")
+        w.name("cameraPermissionGranted").value(hasCameraPermission)
+
+        // Read before writing so a failure cannot leave a half-written JSON array.
+        val concurrentSets = try {
+            cm.concurrentCameraIds.map { it.sorted() }
+        } catch (e: Exception) {
+            w.name("concurrentCameraIdsError").value(e.message ?: e.toString())
+            null
+        }
+        if (concurrentSets != null) {
+            w.name("concurrentCameraIdSets").beginArray()
+            for (set in concurrentSets) {
+                w.beginArray()
+                set.forEach { w.value(it) }
+                w.endArray()
+            }
+            w.endArray()
+        }
+
+        val thread = HandlerThread("HiddenCameraProbe").apply { start() }
+        val handler = Handler(thread.looper)
+        try {
+            w.name("ids").beginArray()
+            for (n in 0..HIDDEN_PROBE_MAX_ID) {
+                val id = n.toString()
+                if (listedIds.contains(id)) continue
+
+                w.beginObject()
+                w.name("id").value(id)
+
+                val chars = try {
+                    cm.getCameraCharacteristics(id)
+                } catch (e: Exception) {
+                    w.name("characteristics").value("error")
+                    w.name("characteristicsError").value("${e.javaClass.simpleName}: ${e.message}")
+                    null
+                }
+
+                if (chars != null) {
+                    responsive.add(id)
+                    w.name("characteristics").value("ok")
+                    w.name("lensFacing").value(lensFacingToString(chars.get(CameraCharacteristics.LENS_FACING)))
+                    chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.let { fl ->
+                        w.name("focalLengthsMm").beginArray()
+                        fl.forEach { w.value(it.toDouble()) }
+                        w.endArray()
+                    }
+                    chars.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)?.let {
+                        w.name("pixelArray").value("${it.width}x${it.height}")
+                    }
+
+                    if (hasCameraPermission) {
+                        val solo = tryOpenCamera(cm, id, handler)
+                        w.name("openAlone").value(solo.status)
+                        solo.device?.close()
+
+                        // Concurrency with the listed rear camera is what stereo capture needs.
+                        val rearListed = listedIds.firstOrNull { lid ->
+                            try {
+                                cm.getCameraCharacteristics(lid).get(CameraCharacteristics.LENS_FACING) ==
+                                    CameraCharacteristics.LENS_FACING_BACK
+                            } catch (_: Exception) { false }
+                        }
+                        if (rearListed != null && solo.device != null) {
+                            val first = tryOpenCamera(cm, rearListed, handler)
+                            if (first.device != null) {
+                                val second = tryOpenCamera(cm, id, handler)
+                                w.name("openWithListedRear").value(rearListed)
+                                w.name("openWithListedRearStatus").value(second.status)
+                                second.device?.close()
+                                first.device.close()
+                            } else {
+                                w.name("openWithListedRearStatus").value("rear ${rearListed} failed: ${first.status}")
+                            }
+                        }
+                    }
+                }
+                w.endObject()
+            }
+            w.endArray()
+        } finally {
+            thread.quitSafely()
+        }
+
+        w.name("responsiveHiddenIds").beginArray()
+        responsive.forEach { w.value(it) }
+        w.endArray()
+        w.endObject()
+        return responsive
+    }
+
+    private class OpenResult(val device: CameraDevice?, val status: String)
+
+    @SuppressLint("MissingPermission") // Caller checks CAMERA permission first.
+    private fun tryOpenCamera(cm: CameraManager, id: String, handler: Handler): OpenResult {
+        val latch = CountDownLatch(1)
+        val abandoned = AtomicBoolean(false)
+        var device: CameraDevice? = null
+        var status = "timeout"
+        try {
+            cm.openCamera(id, object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    if (abandoned.get()) {
+                        // Opened after we gave up waiting; release it immediately.
+                        camera.close()
+                        return
+                    }
+                    device = camera
+                    status = "opened"
+                    latch.countDown()
+                }
+
+                override fun onDisconnected(camera: CameraDevice) {
+                    camera.close()
+                    if (device == null) status = "disconnected"
+                    latch.countDown()
+                }
+
+                override fun onError(camera: CameraDevice, error: Int) {
+                    camera.close()
+                    status = "error ${error} (${cameraDeviceErrorToString(error)})"
+                    latch.countDown()
+                }
+            }, handler)
+        } catch (e: Exception) {
+            return OpenResult(null, "${e.javaClass.simpleName}: ${e.message}")
+        }
+        if (!latch.await(HIDDEN_PROBE_OPEN_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            abandoned.set(true)
+            // onOpened may have raced the timeout; close whatever it produced.
+            if (latch.count == 0L) device?.close()
+            return OpenResult(null, "timeout")
+        }
+        return OpenResult(device, status)
+    }
+
+    private fun cameraDeviceErrorToString(error: Int): String = when (error) {
+        CameraDevice.StateCallback.ERROR_CAMERA_IN_USE -> "in_use"
+        CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE -> "max_cameras_in_use"
+        CameraDevice.StateCallback.ERROR_CAMERA_DISABLED -> "disabled"
+        CameraDevice.StateCallback.ERROR_CAMERA_DEVICE -> "device"
+        CameraDevice.StateCallback.ERROR_CAMERA_SERVICE -> "service"
+        else -> "unknown"
     }
 
     private fun writeFormatSizes(w: JsonWriter, map: StreamConfigurationMap, name: String, format: Int) {

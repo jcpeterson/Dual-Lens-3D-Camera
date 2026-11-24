@@ -20,6 +20,7 @@ import org.opencv.core.Scalar
 import org.opencv.core.Size as CvSize
 import org.opencv.features2d.DescriptorMatcher
 import org.opencv.features2d.ORB
+import org.opencv.features2d.SIFT
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 import java.util.concurrent.atomic.AtomicBoolean
@@ -157,7 +158,7 @@ object StereoSbs {
     }
 
 
-    private fun ensureOpenCv(): Boolean {
+    internal fun ensureOpenCv(): Boolean {
         if (openCvReady.get()) return true
         if (!triedInit.compareAndSet(false, true)) return openCvReady.get()
 
@@ -452,6 +453,280 @@ object StereoSbs {
             try { wideBgr?.release() } catch (_: Exception) {}
             try { ultraBgr?.release() } catch (_: Exception) {}
         }
+    }
+
+    // -------------------- Stereo-corrected SBS (tools/stereo_fix port) --------------------
+
+    /**
+     * Last good photo alignment (ultrawide -> wide similarity plus window shift, in rotated still
+     * pixels). The live 3D preview reuses it, scaled to its small frames.
+     */
+    data class Alignment(
+        val a: Double, val b: Double, val tx: Double, val ty: Double,
+        val wideW: Int, val wideH: Int, val ultraW: Int, val ultraH: Int
+    )
+
+    @Volatile var lastAlignment: Alignment? = null
+
+    /** Last fit with >= 120 inliers, keyed by (wide width, ultra width, ultra height). */
+    @Volatile private var lastStrongModel: Pair<StereoAlignMath.Model, Triple<Int, Int, Int>>? = null
+
+    /**
+     * Builds a stereo-corrected SBS JPEG, following tools/stereo_fix:
+     * SIFT matches -> RANSAC similarity -> vertical-only refinement with ultrawide k1 distortion
+     * (StereoAlignMath) -> stereo window -> single initUndistortRectifyMap warp -> Lab histogram
+     * colour match -> crop to the shared area -> parallel (L|R) or cross-eyed (R|L) layout.
+     *
+     * [wideIsLeft] selects the eye assignment. Returns null on failure so callers can fall back
+     * to [alignAndCreateSbsJpegBytes].
+     */
+    fun correctAndCreateSbsJpegBytes(
+        wide: Nv21Frame,
+        ultra: Nv21Frame,
+        wideIsLeft: Boolean,
+        crossEyed: Boolean,
+        /** true: both views meet at the average colour; false: ultrawide matched to the main lens. */
+        colourAverage: Boolean = true,
+        windowPercentile: Double = 98.0,
+        maxOutputDim: Int = 6144,
+        featureWidth: Int = 1600,
+        expectedScale: Double = 1.5
+    ): ByteArray? {
+        if (!ensureOpenCv()) return null
+        val mats = ArrayList<Mat>()
+        fun <T : Mat> keep(m: T): T { mats.add(m); return m }
+        val t0 = System.nanoTime()
+        try {
+            var wideBgr = nv21ToBgrMat(wide.nv21, wide.width, wide.height) ?: return null
+            wideBgr = downscaleIfNeeded(rotateBgr(wideBgr, wide.rotationDegrees), maxOutputDim)
+            keep(wideBgr)
+            var ultraBgr = nv21ToBgrMat(ultra.nv21, ultra.width, ultra.height) ?: return null
+            ultraBgr = downscaleIfNeeded(rotateBgr(ultraBgr, ultra.rotationDegrees), maxOutputDim)
+            keep(ultraBgr)
+            val wW = wideBgr.cols(); val wH = wideBgr.rows()
+            val uW = ultraBgr.cols(); val uH = ultraBgr.rows()
+
+            // 1) Features.
+            val matches = siftMatches(wideBgr, ultraBgr, featureWidth) ?: return null
+            val (refPts, movPts) = matches
+            val n = refPts.size / 2
+            if (n < 40) { Log.w(TAG, "corrected SBS: only $n matches"); return null }
+
+            // 2) RANSAC similarity for inliers.
+            val from = keep(MatOfPoint2f(*Array(n) { Point(movPts[2 * it], movPts[2 * it + 1]) }))
+            val to = keep(MatOfPoint2f(*Array(n) { Point(refPts[2 * it], refPts[2 * it + 1]) }))
+            val inl = keep(Mat())
+            val init = keep(Calib3d.estimateAffinePartial2D(from, to, inl, Calib3d.RANSAC, 0.03 * uW, 5000, 0.999, 10))
+            if (init.empty()) return null
+            val inlArr = ByteArray(n); inl.get(0, 0, inlArr)
+            val base = BooleanArray(n) { inlArr[it].toInt() != 0 }
+
+            // 3) Vertical-only refinement + distortion.
+            val refX = DoubleArray(n) { refPts[2 * it] }; val refY = DoubleArray(n) { refPts[2 * it + 1] }
+            val movX = DoubleArray(n) { movPts[2 * it] }; val movY = DoubleArray(n) { movPts[2 * it + 1] }
+            val fit = StereoAlignMath.refine(refX, refY, movX, movY, base, uW, uH, fitDistortion = true)
+            val fm = fit.model
+            val plausible = fm.scale in expectedScale * 0.75..expectedScale * 1.35 && abs(fm.rotationDeg) <= 5.0
+            // The lenses are rigid, so a strong earlier fit is better than a weak current one
+            // (e.g. a hand right in front of the lenses, or a blank wall).
+            val reuse = lastStrongModel?.takeIf { it.second == Triple(wW, uW, uH) }?.first
+            val m: StereoAlignMath.Model
+            val useMask: BooleanArray
+            when {
+                plausible && fit.inlierCount >= 60 -> {
+                    m = fm; useMask = fit.inliers
+                    if (fit.inlierCount >= 120) lastStrongModel = m to Triple(wW, uW, uH)
+                }
+                reuse != null -> {
+                    Log.i(TAG, "corrected SBS: weak fit (inliers=${fit.inlierCount}); reusing last strong alignment")
+                    m = reuse; useMask = base
+                }
+                plausible && fit.inlierCount >= 25 -> { m = fm; useMask = fit.inliers }
+                else -> {
+                    Log.w(TAG, "corrected SBS: implausible fit scale=${fm.scale} rot=${fm.rotationDeg} inliers=${fit.inlierCount}")
+                    return null
+                }
+            }
+            val (cX, cY) = if (m === fm) fit.corrX to fit.corrY else StereoAlignMath.undistort(movX, movY, m.k, m.cx, m.cy, m.r)
+            val d = StereoAlignMath.horizontalOffsets(refX, cX, cY, m.a, m.b)
+            val masked = d.filterIndexed { i, _ -> useMask[i] }.toDoubleArray()
+            val dIn = if (masked.isNotEmpty()) masked else d
+            val tx = StereoAlignMath.windowShift(dIn, wideIsLeft, windowPercentile)
+            lastAlignment = Alignment(m.a, m.b, tx, m.ty, wW, wH, uW, uH)
+
+            // 4) Symmetric warp: both views take half the scale, angle and shift onto a shared
+            //    canvas (StereoAlignMath.symmetricPlan); ultrawide distortion is removed in the
+            //    same remap. The main image is already distortion-corrected by the camera.
+            val plan = StereoAlignMath.symmetricPlan(m, tx, wW, wH)
+            val cW = plan.width; val cH = plan.height
+            val canvas = CvSize(cW.toDouble(), cH.toDouble())
+            val r = m.r
+            val camK = keep(Mat(3, 3, CvType.CV_64F)).apply { put(0, 0, r, 0.0, m.cx, 0.0, r, m.cy, 0.0, 0.0, 1.0) }
+            val newK = keep(Mat(3, 3, CvType.CV_64F)).apply { put(0, 0, *plan.ultraNewK) }
+            val dist = keep(Mat(1, 5, CvType.CV_64F)).apply { put(0, 0, m.k, 0.0, 0.0, 0.0, 0.0) }
+            val map1 = keep(Mat()); val map2 = keep(Mat())
+            Calib3d.initUndistortRectifyMap(camK, dist, keep(Mat.eye(3, 3, CvType.CV_64F)), newK,
+                canvas, CvType.CV_16SC2, map1, map2)
+            val warped = keep(Mat())
+            Imgproc.remap(ultraBgr, warped, map1, map2, Imgproc.INTER_CUBIC, Core.BORDER_CONSTANT, Scalar(0.0, 0.0, 0.0))
+            val ones = keep(Mat(uH, uW, CvType.CV_8UC1, Scalar(255.0)))
+            val valid = keep(Mat())
+            Imgproc.remap(ones, valid, map1, map2, Imgproc.INTER_NEAREST, Core.BORDER_CONSTANT, Scalar(0.0))
+            map1.release(); map2.release()
+
+            val hw = keep(Mat(2, 3, CvType.CV_64F)).apply { put(0, 0, *plan.wideAffine) }
+            val wideW = keep(Mat())
+            Imgproc.warpAffine(wideBgr, wideW, hw, canvas, Imgproc.INTER_AREA, Core.BORDER_CONSTANT, Scalar(0.0, 0.0, 0.0))
+            val wideValid = keep(Mat())
+            Imgproc.warpAffine(keep(Mat(wH, wW, CvType.CV_8UC1, Scalar(255.0))), wideValid, hw, canvas,
+                Imgproc.INTER_NEAREST, Core.BORDER_CONSTANT, Scalar(0.0))
+            Core.bitwise_and(valid, wideValid, valid)
+            Imgproc.erode(valid, valid, keep(Imgproc.getStructuringElement(Imgproc.MORPH_RECT, CvSize(5.0, 5.0))))
+
+            // 5) Colour: both to the average (default) or the ultrawide to the main lens, in Lab.
+            if (colourAverage) colourBalanceLab(wideW, warped, valid) else colourMatchLab(warped, wideW, valid)
+
+            // 6) Crop to the largest fully valid rectangle (computed on a 1/8 mask, then scaled).
+            val rect = validCropRect(valid, cW, cH) ?: return null
+            val wideC = wideW.submat(rect)
+            val ultraC = warped.submat(rect)
+            val left = if (wideIsLeft) wideC else ultraC
+            val right = if (wideIsLeft) ultraC else wideC
+            val first = if (crossEyed) right else left
+            val second = if (crossEyed) left else right
+            val sbs = keep(Mat(rect.height, rect.width * 2, CvType.CV_8UC3))
+            first.copyTo(sbs.submat(0, rect.height, 0, rect.width))
+            second.copyTo(sbs.submat(0, rect.height, rect.width, rect.width * 2))
+
+            Log.i(TAG, "corrected SBS: matches=$n inliers=${fit.inlierCount} scale=${"%.4f".format(m.scale)} " +
+                "rot=${"%.3f".format(m.rotationDeg)} ty=${"%.1f".format(m.ty)} k=${"%.4f".format(m.k)} " +
+                "tx=${"%.1f".format(tx)} canvas=${cW}x$cH crop=$rect colourAvg=$colourAverage " +
+                "wideLeft=$wideIsLeft cross=$crossEyed " +
+                "time=${(System.nanoTime() - t0) / 1_000_000}ms")
+            return encodeJpegBytes(sbs, 95)
+        } catch (e: Exception) {
+            Log.e(TAG, "corrected SBS failed: ${e.message}", e)
+            return null
+        } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "corrected SBS out of memory", e)
+            return null
+        } finally {
+            for (mat in mats) try { mat.release() } catch (_: Exception) {}
+        }
+    }
+
+    /** SIFT + FLANN ratio-test matches; returns (refXY, movXY) interleaved in full-res pixels. */
+    internal fun siftMatches(ref: Mat, mov: Mat, work: Int): Pair<DoubleArray, DoubleArray>? {
+        val clahe = Imgproc.createCLAHE(2.0, CvSize(8.0, 8.0))
+        fun prep(img: Mat): Pair<Mat, Double> {
+            val s = work.toDouble() / img.cols()
+            val small = Mat(); val gray = Mat()
+            Imgproc.resize(img, small, CvSize(img.cols() * s, img.rows() * s), 0.0, 0.0, Imgproc.INTER_AREA)
+            Imgproc.cvtColor(small, gray, Imgproc.COLOR_BGR2GRAY)
+            small.release()
+            clahe.apply(gray, gray)
+            return gray to s
+        }
+        val (gR, sR) = prep(ref)
+        val (gM, sM) = prep(mov)
+        val sift = SIFT.create(6000)
+        val kR = MatOfKeyPoint(); val kM = MatOfKeyPoint(); val dR = Mat(); val dM = Mat()
+        try {
+            sift.detectAndCompute(gR, Mat(), kR, dR)
+            sift.detectAndCompute(gM, Mat(), kM, dM)
+            if (dR.empty() || dM.empty()) return null
+            val matcher = DescriptorMatcher.create(DescriptorMatcher.FLANNBASED)
+            val knn = ArrayList<MatOfDMatch>()
+            matcher.knnMatch(dM, dR, knn, 2)
+            val kpR = kR.toArray(); val kpM = kM.toArray()
+            val refXY = ArrayList<Double>(); val movXY = ArrayList<Double>()
+            for (pair in knn) {
+                val arr = pair.toArray()
+                if (arr.size == 2 && arr[0].distance < 0.72f * arr[1].distance) {
+                    val p = kpR[arr[0].trainIdx].pt; val q = kpM[arr[0].queryIdx].pt
+                    refXY.add(p.x / sR); refXY.add(p.y / sR)
+                    movXY.add(q.x / sM); movXY.add(q.y / sM)
+                }
+                pair.release()
+            }
+            return refXY.toDoubleArray() to movXY.toDoubleArray()
+        } finally {
+            gR.release(); gM.release(); kR.release(); kM.release(); dR.release(); dM.release()
+        }
+    }
+
+    /** In-place histogram match of [src] to [ref] per Lab channel, using pixels where [mask] != 0. */
+    private fun colourMatchLab(src: Mat, ref: Mat, mask: Mat) {
+        val srcLab = Mat(); val refLab = Mat()
+        Imgproc.cvtColor(src, srcLab, Imgproc.COLOR_BGR2Lab)
+        Imgproc.cvtColor(ref, refLab, Imgproc.COLOR_BGR2Lab)
+        val sCh = ArrayList<Mat>(); val rCh = ArrayList<Mat>()
+        Core.split(srcLab, sCh); Core.split(refLab, rCh)
+        try {
+            for (c in 0 until 3) {
+                val sHist = histogram(sCh[c], mask)
+                val rHist = histogram(rCh[c], mask)
+                val lut = StereoAlignMath.matchLinearLut(sHist, rHist)
+                val lutMat = Mat(1, 256, CvType.CV_8UC1)
+                lutMat.put(0, 0, ByteArray(256) { lut[it].toByte() })
+                Core.LUT(sCh[c], lutMat, sCh[c])
+                lutMat.release()
+            }
+            Core.merge(sCh, srcLab)
+            Imgproc.cvtColor(srcLab, src, Imgproc.COLOR_Lab2BGR)
+        } finally {
+            srcLab.release(); refLab.release()
+            sCh.forEach { it.release() }; rCh.forEach { it.release() }
+        }
+    }
+
+    /** In-place: maps both images to the average of their Lab histograms over [mask]. */
+    private fun colourBalanceLab(a: Mat, b: Mat, mask: Mat) {
+        val la = Mat(); val lb = Mat()
+        Imgproc.cvtColor(a, la, Imgproc.COLOR_BGR2Lab)
+        Imgproc.cvtColor(b, lb, Imgproc.COLOR_BGR2Lab)
+        val ca = ArrayList<Mat>(); val cb = ArrayList<Mat>()
+        Core.split(la, ca); Core.split(lb, cb)
+        try {
+            for (c in 0 until 3) {
+                val (lutA, lutB) = StereoAlignMath.averageTargetLuts(histogram(ca[c], mask), histogram(cb[c], mask))
+                for ((ch, lut) in listOf(ca[c] to lutA, cb[c] to lutB)) {
+                    val lm = Mat(1, 256, CvType.CV_8UC1)
+                    lm.put(0, 0, ByteArray(256) { lut[it].toByte() })
+                    Core.LUT(ch, lm, ch)
+                    lm.release()
+                }
+            }
+            Core.merge(ca, la); Core.merge(cb, lb)
+            Imgproc.cvtColor(la, a, Imgproc.COLOR_Lab2BGR)
+            Imgproc.cvtColor(lb, b, Imgproc.COLOR_Lab2BGR)
+        } finally {
+            la.release(); lb.release(); ca.forEach { it.release() }; cb.forEach { it.release() }
+        }
+    }
+
+    internal fun histogram(channel: Mat, mask: Mat): DoubleArray {
+        val hist = Mat()
+        Imgproc.calcHist(listOf(channel), MatOfInt(0), mask, hist, MatOfInt(256), org.opencv.core.MatOfFloat(0f, 256f))
+        val f = FloatArray(256); hist.get(0, 0, f); hist.release()
+        return DoubleArray(256) { f[it].toDouble() }
+    }
+
+    /** Largest all-valid rectangle, found on a 1/8 scale mask and scaled back conservatively. */
+    internal fun validCropRect(valid: Mat, w: Int, h: Int): Rect? {
+        val f = 8
+        val sw = w / f; val sh = h / f
+        if (sw < 20 || sh < 20) return null
+        val small = Mat()
+        Imgproc.resize(valid, small, CvSize(sw.toDouble(), sh.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+        val bytes = ByteArray(sw * sh); small.get(0, 0, bytes); small.release()
+        val mask = BooleanArray(sw * sh) { (bytes[it].toInt() and 0xFF) == 255 }
+        val rr = StereoAlignMath.largestValidRect(mask, sw, sh)
+        val x0 = rr[0] * f; val y0 = rr[1] * f
+        val x1 = if (rr[2] == sw) w else rr[2] * f
+        val y1 = if (rr[3] == sh) h else rr[3] * f
+        if (x1 - x0 < w / 2 || y1 - y0 < h / 2) return null
+        return Rect(x0, y0, x1 - x0, y1 - y0)
     }
 
     private fun nv21ToBgrMat(nv21: ByteArray, width: Int, height: Int): Mat? {

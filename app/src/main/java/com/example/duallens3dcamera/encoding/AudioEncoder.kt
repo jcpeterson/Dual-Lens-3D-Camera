@@ -36,6 +36,7 @@ class AudioEncoder(
     @Volatile private var eosQueued = false
     @Volatile private var started = false
     @Volatile private var capturing = false
+    @Volatile private var abandon = false
 
     private var totalSamplesSubmitted: Long = 0L
 
@@ -139,6 +140,17 @@ class AudioEncoder(
         val codecLocal = requireNotNull(codec)
 
         feedThread = Thread({
+            // Never let a codec error escape: it would kill the app before the muxers finish.
+            try { feedLoop(record, codecLocal) } catch (t: Throwable) {
+                Log.e(tag, "Audio feed stopped: ${t.message}", t)
+            }
+        }, "$tag-Feed").also { it.start() }
+
+        Log.i(tag, "Audio capture started")
+    }
+
+    private fun feedLoop(record: AudioRecord, codecLocal: MediaCodec) {
+        run {
             try {
                 record.startRecording()
             } catch (se: SecurityException) {
@@ -189,9 +201,7 @@ class AudioEncoder(
             }
 
             queueEos()
-        }, "$tag-Feed").also { it.start() }
-
-        Log.i(tag, "Audio capture started")
+        }
     }
 
     fun stopAndRelease() {
@@ -200,17 +210,29 @@ class AudioEncoder(
         // Unblock any pending read().
         try { audioRecord?.stop() } catch (_: Exception) {}
 
-        try { feedThread?.join(3_000) } catch (_: Exception) {}
+        val feed = feedThread
+        try { feed?.join(3_000) } catch (_: Exception) {}
         feedThread = null
 
         // Ensure EOS even if feed thread didn’t manage to queue it.
-        queueEos()
+        try { queueEos() } catch (e: Exception) { Log.w(tag, "queueEos failed: ${e.message}") }
 
-        try { drainThread?.join(5_000) } catch (_: Exception) {}
+        val drain = drainThread
+        try { drain?.join(5_000) } catch (_: Exception) {}
+        if (drain != null && drain.isAlive) {
+            Log.w(tag, "Audio EOS not reached in 5 s; abandoning")
+            abandon = true
+            try { drain.join(2_000) } catch (_: Exception) {}
+        }
         drainThread = null
 
-        try { codec?.stop() } catch (_: Exception) {}
-        try { codec?.release() } catch (_: Exception) {}
+        // Release the codec only once no thread is still using it.
+        if (feed?.isAlive == true || drain?.isAlive == true) {
+            Log.e(tag, "Audio thread did not exit; not releasing codec")
+        } else {
+            try { codec?.stop() } catch (_: Exception) {}
+            try { codec?.release() } catch (_: Exception) {}
+        }
         codec = null
 
         try { audioRecord?.release() } catch (_: Exception) {}
@@ -251,9 +273,17 @@ class AudioEncoder(
     }
 
     private fun drainLoop() {
+        try {
+            drainLoopInner()
+        } catch (t: Throwable) {
+            Log.e(tag, "Audio drain stopped: ${t.message}", t)
+        }
+    }
+
+    private fun drainLoopInner() {
         val codecLocal = codec ?: return
 
-        while (true) {
+        while (!abandon) {
             val outIndex = codecLocal.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
             when {
                 outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
