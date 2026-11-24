@@ -13,13 +13,17 @@
         android:layout_width="0dp"
         android:layout_height="48dp"
         android:orientation="horizontal"
-        android:weightSum="4"
+        android:weightSum="6"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <com.google.android.material.button.MaterialButton
+        <com.example.duallens3dcamera.ui.RotatingButton
             android:id="@+id/btnSettings"
+            app:icon="@drawable/ic_settings"
+            app:iconGravity="textStart"
+            app:iconPadding="6dp"
+            app:iconTint="@android:color/white"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="2"
@@ -35,8 +39,10 @@
             app:backgroundTint="@android:color/black"
             app:cornerRadius="0dp"/>
 
-        <com.google.android.material.button.MaterialButton
+        <com.example.duallens3dcamera.ui.RotatingButton
             android:id="@+id/btnEis"
+            android:paddingStart="0dp"
+            android:paddingEnd="0dp"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
@@ -52,9 +58,31 @@
             app:backgroundTint="@android:color/black"
             app:cornerRadius="0dp"/>
 
+        <!-- Live preview mode: 2D / 3D side-by-side / ANA (red-cyan anaglyph) -->
+        <com.example.duallens3dcamera.ui.RotatingButton
+            android:id="@+id/btnPreview3d"
+            android:paddingStart="0dp"
+            android:paddingEnd="0dp"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textAllCaps="false"
+            android:text="2D"
+            android:textColor="@android:color/white"
+            app:backgroundTint="@android:color/black"
+            app:cornerRadius="0dp"/>
+
         <!-- Keep id btnFormat for the photo format toggle -->
-        <com.google.android.material.button.MaterialButton
+        <com.example.duallens3dcamera.ui.RotatingButton
             android:id="@+id/btnFormat"
+            android:paddingStart="0dp"
+            android:paddingEnd="0dp"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
@@ -66,6 +94,25 @@
             android:ellipsize="end"
             android:textAllCaps="false"
             android:text="JPG"
+            android:textColor="@android:color/white"
+            app:backgroundTint="@android:color/black"
+            app:cornerRadius="0dp"/>
+
+        <!-- Pro: manual ISO / shutter (same on both lenses) -->
+        <com.example.duallens3dcamera.ui.RotatingButton
+            android:id="@+id/btnPro"
+            android:paddingStart="0dp"
+            android:paddingEnd="0dp"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:maxLines="1"
+            android:textAllCaps="false"
+            android:text="PRO"
             android:textColor="@android:color/white"
             app:backgroundTint="@android:color/black"
             app:cornerRadius="0dp"/>
@@ -81,8 +128,78 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"/>
 
+    <!-- Live 3D preview frames (side-by-side or anaglyph), shown over the normal preview -->
+    <ImageView
+        android:id="@+id/preview3d"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="@android:color/black"
+        android:contentDescription="Live 3D preview"
+        android:scaleType="fitCenter"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="@id/textureView"
+        app:layout_constraintBottom_toBottomOf="@id/textureView"
+        app:layout_constraintStart_toStartOf="@id/textureView"
+        app:layout_constraintEnd_toEndOf="@id/textureView"/>
+
+    <!-- Grid / spirit level overlay (viewfinder only, never in photos) -->
+    <com.example.duallens3dcamera.ui.LevelGridOverlay
+        android:id="@+id/levelGrid"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintTop_toTopOf="@id/textureView"
+        app:layout_constraintBottom_toBottomOf="@id/textureView"
+        app:layout_constraintStart_toStartOf="@id/textureView"
+        app:layout_constraintEnd_toEndOf="@id/textureView"/>
+
+    <!-- Self-timer countdown -->
+    <TextView
+        android:id="@+id/countdownText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:shadowColor="@android:color/black"
+        android:shadowRadius="8"
+        android:textColor="@android:color/white"
+        android:textSize="120sp"
+        android:textStyle="bold"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="@id/textureView"
+        app:layout_constraintBottom_toBottomOf="@id/textureView"
+        app:layout_constraintStart_toStartOf="@id/textureView"
+        app:layout_constraintEnd_toEndOf="@id/textureView"/>
+
+    <!-- Time-lapse progress (tap to brighten the screen while it runs) -->
+    <TextView
+        android:id="@+id/lapseStatus"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_margin="8dp"
+        android:background="#B0000000"
+        android:gravity="center"
+        android:padding="8dp"
+        android:textColor="@android:color/white"
+        android:textSize="15sp"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="@id/textureView"
+        app:layout_constraintStart_toStartOf="@id/textureView"
+        app:layout_constraintEnd_toEndOf="@id/textureView"/>
+
+    <!-- Pro panel: ISO and shutter choices (built in code) -->
+    <LinearLayout
+        android:id="@+id/proPanel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="#C0000000"
+        android:orientation="vertical"
+        android:paddingTop="4dp"
+        android:paddingBottom="4dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@id/textureView"
+        app:layout_constraintStart_toStartOf="@id/textureView"
+        app:layout_constraintEnd_toEndOf="@id/textureView"/>
+
     <!-- 1x/2x zoom toggle (overlayed on preview) -->
-    <com.google.android.material.button.MaterialButton
+    <com.example.duallens3dcamera.ui.RotatingButton
         android:id="@+id/btnZoom"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
@@ -104,7 +221,7 @@
         android:textColor="@android:color/white"
         app:backgroundTint="@android:color/black"
         app:cornerRadius="16dp"
-        app:layout_constraintBottom_toBottomOf="@id/textureView"
+        app:layout_constraintBottom_toTopOf="@id/proPanel"
         app:layout_constraintEnd_toEndOf="@id/textureView"/>
 
     <!-- Bottom controls -->
@@ -118,29 +235,128 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnTorch"
+        <!-- Tools row: torch, self-timer, grid/level, time-lapse -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:textAllCaps="false"
-            android:text="Torch OFF"
-            android:textColor="@android:color/white"
-            app:backgroundTint="@android:color/black"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            app:cornerRadius="0dp"/>
+            android:orientation="horizontal">
+
+            <com.example.duallens3dcamera.ui.RotatingButton
+                android:id="@+id/btnTorch"
+                app:icon="@drawable/ic_flash"
+                app:iconGravity="textTop"
+                app:iconPadding="2dp"
+                app:iconSize="22dp"
+                app:iconTint="@android:color/white"
+                android:letterSpacing="0"
+                android:textSize="12sp"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:maxLines="1"
+                android:textAllCaps="false"
+                android:text="Torch OFF"
+                android:textColor="@android:color/white"
+                app:backgroundTint="@android:color/black"
+                android:insetLeft="0dp"
+                android:insetRight="0dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:paddingStart="2dp"
+                android:paddingEnd="2dp"
+                app:cornerRadius="0dp"/>
+
+            <com.example.duallens3dcamera.ui.RotatingButton
+                android:id="@+id/btnTimer"
+                app:icon="@drawable/ic_timer"
+                app:iconGravity="textTop"
+                app:iconPadding="2dp"
+                app:iconSize="22dp"
+                app:iconTint="@android:color/white"
+                android:letterSpacing="0"
+                android:textSize="12sp"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:maxLines="1"
+                android:textAllCaps="false"
+                android:text="Timer OFF"
+                android:textColor="@android:color/white"
+                app:backgroundTint="@android:color/black"
+                android:insetLeft="0dp"
+                android:insetRight="0dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:paddingStart="2dp"
+                android:paddingEnd="2dp"
+                app:cornerRadius="0dp"/>
+
+            <com.example.duallens3dcamera.ui.RotatingButton
+                android:id="@+id/btnGrid"
+                app:icon="@drawable/ic_grid"
+                app:iconGravity="textTop"
+                app:iconPadding="2dp"
+                app:iconSize="22dp"
+                app:iconTint="@android:color/white"
+                android:letterSpacing="0"
+                android:textSize="12sp"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:maxLines="1"
+                android:textAllCaps="false"
+                android:text="Grid off"
+                android:textColor="@android:color/white"
+                app:backgroundTint="@android:color/black"
+                android:insetLeft="0dp"
+                android:insetRight="0dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:paddingStart="2dp"
+                android:paddingEnd="2dp"
+                app:cornerRadius="0dp"/>
+
+            <com.example.duallens3dcamera.ui.RotatingButton
+                android:id="@+id/btnLapse"
+                app:icon="@drawable/ic_timelapse"
+                app:iconGravity="textTop"
+                app:iconPadding="2dp"
+                app:iconSize="22dp"
+                app:iconTint="@android:color/white"
+                android:letterSpacing="0"
+                android:textSize="12sp"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:maxLines="1"
+                android:textAllCaps="false"
+                android:text="T-lapse"
+                android:textColor="@android:color/white"
+                app:backgroundTint="@android:color/black"
+                android:insetLeft="0dp"
+                android:insetRight="0dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:paddingStart="2dp"
+                android:paddingEnd="2dp"
+                app:cornerRadius="0dp"/>
+        </LinearLayout>
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:layout_weight="2"
+            android:layout_weight="1.4"
             android:orientation="horizontal">
 
-            <com.google.android.material.button.MaterialButton
+            <com.example.duallens3dcamera.ui.RotatingButton
                 android:id="@+id/btnPhoto"
+                app:icon="@drawable/ic_photo_camera"
+                app:iconGravity="textStart"
+                app:iconPadding="10dp"
+                app:iconSize="30dp"
+                app:iconTint="@android:color/white"
+                android:textSize="17sp"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
                 android:layout_weight="1"
@@ -154,8 +370,14 @@
                 android:insetBottom="0dp"
                 app:cornerRadius="0dp"/>
 
-            <com.google.android.material.button.MaterialButton
+            <com.example.duallens3dcamera.ui.RotatingButton
                 android:id="@+id/btnRecord"
+                app:icon="@drawable/ic_videocam"
+                app:iconGravity="textStart"
+                app:iconPadding="10dp"
+                app:iconSize="30dp"
+                app:iconTint="@android:color/white"
+                android:textSize="17sp"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
                 android:layout_weight="1"

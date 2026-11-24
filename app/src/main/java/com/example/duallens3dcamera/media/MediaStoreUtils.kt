@@ -44,6 +44,22 @@ object MediaStoreUtils {
         }
     }
 
+    /** MediaStore RELATIVE_PATH of the app's recordings (with the trailing slash MediaStore stores). */
+    val VIDEOS_RELATIVE_PATH: String get() = "$RELATIVE_DIR_VIDEOS/"
+
+    /** Combined 3D videos made from recordings: Pictures/StereoCapture/3d */
+    fun createPending3dVideo(context: Context, displayName: String, timestampMillis: Long): Uri {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.DATE_TAKEN, timestampMillis)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "$RELATIVE_DIR/3d")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        return context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            ?: throw IllegalStateException("Failed to insert 3D video into MediaStore")
+    }
+
     fun createPendingVideo(context: Context, displayName: String, timestampMillis: Long): Uri {
         val resolver = context.contentResolver
         val collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI

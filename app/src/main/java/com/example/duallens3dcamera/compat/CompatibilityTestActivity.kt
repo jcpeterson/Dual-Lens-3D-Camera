@@ -13,8 +13,8 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 
 /**
- * "Compatibility test": runs [CompatibilityTester] and shows a verdict for stereo photos and stereo
- * video, with a shareable text report for testing other phones.
+ * "Compatibility test": runs [CompatibilityTester] and shows a verdict for stereo photos, stereo
+ * video and live 3D preview, with a shareable text report for testing other phones.
  */
 class CompatibilityTestActivity : AppCompatActivity() {
 
@@ -34,7 +34,7 @@ class CompatibilityTestActivity : AppCompatActivity() {
             typeface = Typeface.MONOSPACE
             textSize = 12f
             setTextIsSelectable(true)
-            text = "Checks whether this phone can take stereo photos and videos with two of its rear " +
+            text = "Checks whether this phone can take 3D photos and videos with two of its rear " +
                 "lenses. The camera is used for a few seconds; keep the phone still and pointed at " +
                 "something with detail.\n"
         }
@@ -90,6 +90,7 @@ class CompatibilityTestActivity : AppCompatActivity() {
             append("==== Result ====")
             append("3D photos:        ${mark(v.photos)}")
             append("3D video:         ${mark(v.video)}")
+            append("Live 3D preview:  ${mark(v.livePreview)}")
             v.notes.forEach { append("Note: $it") }
             runOnUiThread {
                 running = false

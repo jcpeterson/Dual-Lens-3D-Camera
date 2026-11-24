@@ -21,6 +21,7 @@ import android.os.HandlerThread
 import android.util.Size
 import android.view.Surface
 import com.example.duallens3dcamera.camera.LensDiscovery
+import com.example.duallens3dcamera.camera.LivePreview3d
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -30,7 +31,8 @@ import kotlin.math.sqrt
 /**
  * Automated check of whether this phone can do dual-lens stereo with this app:
  * camera IDs (including hidden ones), the rear logical pair, a simultaneous photo pair, stereo
- * video into real encoders (with the hidden-camera workaround if needed). Blocking; run off the main thread. [log] receives human-readable lines.
+ * video into real encoders (with the hidden-camera workaround if needed) and the 4-stream live
+ * 3D preview. Blocking; run off the main thread. [log] receives human-readable lines.
  */
 class CompatibilityTester(private val context: Context, private val log: (String) -> Unit) {
 
@@ -85,7 +87,7 @@ class CompatibilityTester(private val context: Context, private val log: (String
             if (rig == null) {
                 log("  ✗ No rear paired (logical multi-) camera with two lenses was found.")
                 notes += "This phone does not expose two rear lenses together to apps. A mirror adapter on the main camera is the alternative."
-                return Verdict(Support.NO, Support.NO, Support.NOT_TESTED, notes)
+                return Verdict(Support.NO, Support.NO, Support.NO, notes)
             }
             val logicalChars = cm.getCameraCharacteristics(rig.logicalRearId)
             val wideChars = cm.getCameraCharacteristics(rig.wide1xId)
@@ -102,7 +104,7 @@ class CompatibilityTester(private val context: Context, private val log: (String
 
             val camera = open(rig.logicalRearId) ?: run {
                 log("  ✗ Could not open camera ${rig.logicalRearId}.")
-                return Verdict(Support.NO, Support.NO, Support.NOT_TESTED, notes)
+                return Verdict(Support.NO, Support.NO, Support.NO, notes)
             }
             try {
                 // 3) Photo pair
@@ -121,7 +123,12 @@ class CompatibilityTester(private val context: Context, private val log: (String
                     } else Support.NO
                 }
                 log("")
-                return Verdict(photos, video, Support.NOT_TESTED, notes)
+
+                // 5) Live 3D preview
+                log("[5] Live 3D preview (4 streams)")
+                val live = testLivePreview(camera, rig, wideChars, ultraChars)
+                log("")
+                return Verdict(photos, video, live, notes)
             } finally {
                 camera.close()
             }
@@ -232,6 +239,42 @@ class CompatibilityTester(private val context: Context, private val log: (String
             wOk && !uOk -> { log("  ✗ The ultrawide recorded blank or no frames."); Support.NO }
             else -> { log("  ✗ Neither lens recorded video."); Support.NO }
         }
+    }
+
+    private fun testLivePreview(camera: CameraDevice, rig: LensDiscovery.StereoRig,
+                                wideChars: CameraCharacteristics, ultraChars: CameraCharacteristics): Support {
+        val ws = LivePreview3d.pickSmallSize(wideChars.yuvSizes()); val us = LivePreview3d.pickSmallSize(ultraChars.yuvSizes())
+        val wStill = pickSize(wideChars, ImageFormat.YUV_420_888, 4096); val uStill = pickSize(ultraChars, ImageFormat.YUV_420_888, 4096)
+        if (ws == null || us == null || wStill == null || uStill == null) { log("  ✗ Missing sizes."); return Support.NO }
+        val readers = listOf(
+            ImageReader.newInstance(ws.width, ws.height, ImageFormat.YUV_420_888, 2),
+            ImageReader.newInstance(us.width, us.height, ImageFormat.YUV_420_888, 2),
+            ImageReader.newInstance(wStill.width, wStill.height, ImageFormat.YUV_420_888, 2),
+            ImageReader.newInstance(uStill.width, uStill.height, ImageFormat.YUV_420_888, 2)
+        )
+        val got = arrayOf(AtomicLong(), AtomicLong())
+        readers[0].setOnImageAvailableListener({ r -> r.acquireLatestImage()?.close(); got[0].incrementAndGet() }, handler)
+        readers[1].setOnImageAvailableListener({ r -> r.acquireLatestImage()?.close(); got[1].incrementAndGet() }, handler)
+        try {
+            val ids = listOf(rig.wide1xId, rig.ultraId, rig.wide1xId, rig.ultraId)
+            val session = configure(camera, readers.mapIndexed { i, r -> OutputConfiguration(r.surface).apply { setPhysicalCameraId(ids[i]) } })
+                ?: run { log("  ✗ The phone refused the 4-stream setup; the app will keep the normal 2D preview."); return Support.NO }
+            try {
+                val req = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                    addTarget(readers[0].surface); addTarget(readers[1].surface)
+                }
+                session.setRepeatingRequest(req.build(), null, handler)
+                Thread.sleep(1000)
+                session.stopRepeating()
+            } finally {
+                session.close()
+            }
+        } finally {
+            readers.forEach { it.close() }
+        }
+        log("  Frames in 1 s: main ${got[0].get()}, ultrawide ${got[1].get()}")
+        return if (got[0].get() >= 5 && got[1].get() >= 5) { log("  ✓ Live 3D preview works."); Support.YES }
+        else { log("  ✗ Streams did not deliver frames."); Support.NO }
     }
 
     // ------------------------------------------------------------------ helpers
